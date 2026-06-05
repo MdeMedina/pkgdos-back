@@ -1,0 +1,155 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum GlobalRole {
+  admin
+  operator
+}
+
+enum BrandStatus {
+  Active
+  Paused
+  Archived
+}
+
+enum SessionStatus {
+  Open
+  Closed
+  Archived
+}
+
+enum ResolutionStatus {
+  Unresolved
+  Resolved
+  Stalled
+}
+
+enum GoldExtractionStatus {
+  None
+  Pending
+  Extracted
+  Failed
+}
+
+enum AssetType {
+  SOP
+  Dogma
+  Gold
+  Jewel
+}
+
+enum VectorizationStatus {
+  Pending
+  Embedded
+  Error
+}
+
+model User {
+  id                  String       @id @default(uuid()) @db.Uuid
+  full_name           String
+  email               String       @unique
+  password_hash       String
+  global_role         GlobalRole   @default(operator)
+  session_token_n8n   String?
+  friction_level      Float        @default(0.0)
+  calcification_level Float        @default(0.0)
+  created_at          DateTime     @default(now())
+  updated_at          DateTime     @default(now()) @updatedAt
+  brands              UserBrand[]
+  sessions            Session[]
+
+  @@map("users")
+}
+
+model Brand {
+  id               String           @id @default(uuid()) @db.Uuid
+  name             String
+  industry         String
+  status           BrandStatus      @default(Active)
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @default(now()) @updatedAt
+  users            UserBrand[]
+  sessions         Session[]
+  knowledge_assets KnowledgeAsset[]
+
+  @@map("brands")
+}
+
+model UserBrand {
+  user_id  String @db.Uuid
+  brand_id String @db.Uuid
+  user     User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  brand    Brand  @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, brand_id])
+  @@map("user_brands")
+}
+
+model Session {
+  id                             String               @id @default(uuid()) @db.Uuid
+  user_id                        String               @db.Uuid
+  brand_id                       String?              @db.Uuid
+  title                          String
+  status                         SessionStatus        @default(Open)
+  friction_level                 Float                @default(0.0) // Max reached in session
+  calcification_delta            Float                @default(0.0)
+  interval_count                 Int                  @default(0)
+  glitch_count                   Int                  @default(0)
+  encauzamiento_count            Int                  @default(0)
+  coupling_node_triggered        Boolean              @default(false)
+  resolution_status              ResolutionStatus     @default(Unresolved)
+  integration_signal_received_at DateTime?
+  gold_extraction_status         GoldExtractionStatus @default(None)
+  transcript_payload             Json                 @default("[]") // JSONB of ChatMessages
+  glitches                       Json                 @default("[]") // JSONB of Glitches
+  extracted_asset_id             String?              @db.Uuid
+  created_at                     DateTime             @default(now())
+  updated_at                     DateTime             @default(now()) @updatedAt
+
+  user            User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  brand           Brand?          @relation(fields: [brand_id], references: [id], onDelete: SetNull)
+  extracted_asset KnowledgeAsset? @relation("SessionExtractedAsset", fields: [extracted_asset_id], references: [id], onDelete: SetNull)
+
+  source_knowledge KnowledgeAsset[] @relation("KnowledgeSourceSession")
+
+  @@map("sessions")
+}
+
+model KnowledgeAsset {
+  id                   String              @id @default(uuid()) @db.Uuid
+  brand_id             String              @db.Uuid
+  title                String
+  asset_type           AssetType
+  status               String              @default("Active")
+  source_file_url      String?
+  pgvector_ref_id      String?
+  vectorization_status VectorizationStatus @default(Pending)
+  source_session_id    String?             @db.Uuid
+  created_at           DateTime            @default(now())
+
+  brand          Brand            @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+  source_session Session?         @relation("KnowledgeSourceSession", fields: [source_session_id], references: [id], onDelete: SetNull)
+  chunks         DocumentChunk[]
+  
+  extracted_from_sessions Session[] @relation("SessionExtractedAsset")
+
+  @@map("knowledge_assets")
+}
+
+model DocumentChunk {
+  id                 String         @id @default(uuid()) @db.Uuid
+  knowledge_asset_id String         @db.Uuid
+  content            String
+  embedding          Unsupported("vector(1536)")?
+  created_at         DateTime       @default(now())
+
+  knowledge_asset KnowledgeAsset @relation(fields: [knowledge_asset_id], references: [id], onDelete: Cascade)
+
+  @@map("document_chunks")
+}
