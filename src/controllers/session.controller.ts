@@ -267,8 +267,25 @@ export class SessionController {
           throw new Error(`n8n webhook responded with status: ${response.status}`);
         }
 
-        const data = (await response.json()) as { text: string };
-        replyText = data.text || "No response text received from the Oracle.";
+        const rawText = await response.text();
+        const parsed = rawText ? JSON.parse(rawText) : {};
+        const root = Array.isArray(parsed) ? parsed[0] : parsed; // tolera [{...}] u {...}
+
+        let payload = root?.payload;
+        // Pregunta Sencilla envía payload como string JSON con el texto en .payload
+        if (typeof payload === "string" && payload.trim().startsWith("{")) {
+          try {
+            const inner = JSON.parse(payload);
+            if (typeof inner?.payload === 'string') {
+              payload = inner.payload;
+            }
+          } catch { /* dejar payload tal cual */ }
+        }
+
+        replyText = (typeof payload === "string" && payload.trim())
+          ? payload
+          : "No response text received from the Oracle.";
+
       } else {
         console.warn("N8N_INTAKE_WEBHOOK is not defined. Falling back to local mock chatbot reply.");
         const en = [

@@ -33,9 +33,19 @@ export class AuthService {
       expiresIn: "24h",
     });
 
+    if (!user.session_token_n8n) {
+      const sessionTokenN8n = `n8n.token.${Math.random().toString(36).substring(2, 10)}`;
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { session_token_n8n: sessionTokenN8n },
+      });
+      user.session_token_n8n = sessionTokenN8n;
+    }
+
     return {
       token,
       user: toUserResponseDto(user),
     };
+
   }
 }

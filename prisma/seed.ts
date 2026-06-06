@@ -55,6 +55,7 @@ async function main() {
       email: "admin@pkgd.os",
       password_hash: passwordHash,
       global_role: "admin",
+      session_token_n8n: "n8n.token.admin123",
       friction_level: 0.0,
       calcification_level: 0.0,
     },
@@ -67,6 +68,7 @@ async function main() {
       email: "helena.ruiz@pkgd.os",
       password_hash: operatorPasswordHash,
       global_role: "operator",
+      session_token_n8n: "n8n.token.helena123",
       friction_level: 62.0,
       calcification_level: 34.0,
     },
@@ -79,6 +81,7 @@ async function main() {
       email: "marco.petrov@pkgd.os",
       password_hash: operatorPasswordHash,
       global_role: "operator",
+      session_token_n8n: "n8n.token.marco123",
       friction_level: 81.0,
       calcification_level: 58.0,
     },
@@ -91,10 +94,12 @@ async function main() {
       email: "ana.volkov@pkgd.os",
       password_hash: operatorPasswordHash,
       global_role: "operator",
+      session_token_n8n: "n8n.token.ana123",
       friction_level: 24.0,
       calcification_level: 12.0,
     },
   });
+
 
   console.log("Users seeded.");
 
