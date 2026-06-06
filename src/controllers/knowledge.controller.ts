@@ -2,8 +2,10 @@ import { Response, Request } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "../config/database.js";
+import { env } from "../config/env.js";
 import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
 import { AssetType, VectorizationStatus } from "@prisma/client";
+
 
 export class KnowledgeController {
   // Get knowledge assets by brand
@@ -64,21 +66,55 @@ export class KnowledgeController {
 
       console.log(`Document received. Initiated ingestion pipeline for KnowledgeAsset: ${asset.id}`);
 
-      // Simulate asynchronous pgvector embedding/chunking (in dev/mock fallback mode)
-      setTimeout(async () => {
-        try {
-          const updated = await prisma.knowledgeAsset.update({
-            where: { id: asset.id },
-            data: {
-              vectorization_status: "Embedded",
-              pgvector_ref_id: `pg_vec_${asset.id.substring(0, 8)}`,
-            },
+      // Notify n8n for chunking and vectorization
+      if (env.N8N_INTAKE_WEBHOOK) {
+        console.log(`Notifying n8n at: ${env.N8N_INTAKE_WEBHOOK}`);
+        fetch(env.N8N_INTAKE_WEBHOOK, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-n8n-token": env.N8N_SECRET_TOKEN,
+          },
+          body: JSON.stringify({
+            id: asset.id,
+            brand_id: asset.brand_id,
+            title: asset.title,
+            asset_type: asset.asset_type,
+            source_file_url: asset.source_file_url,
+            file_name: file.filename,
+            file_path: file.path,
+            status: asset.status,
+            created_at: asset.created_at,
+          }),
+        })
+          .then((response) => {
+            if (!response.ok) {
+              console.error(`n8n intake webhook responded with status: ${response.status}`);
+            } else {
+              console.log(`n8n intake webhook notified successfully for asset: ${asset.id}`);
+            }
+          })
+          .catch((err) => {
+            console.error("Failed to call n8n intake webhook:", err);
           });
-          console.log(`Pipeline finished. KnowledgeAsset ${updated.id} status transitioned to Embedded.`);
-        } catch (e) {
-          console.error("Async embedding simulator failed:", e);
-        }
-      }, 5000);
+      } else {
+        console.warn("N8N_INTAKE_WEBHOOK is not defined. Falling back to local mock simulation.");
+        // Simulate asynchronous pgvector embedding/chunking (mock fallback)
+        setTimeout(async () => {
+          try {
+            const updated = await prisma.knowledgeAsset.update({
+              where: { id: asset.id },
+              data: {
+                vectorization_status: "Embedded",
+                pgvector_ref_id: `pg_vec_${asset.id.substring(0, 8)}`,
+              },
+            });
+            console.log(`Pipeline mock finished. KnowledgeAsset ${updated.id} status transitioned to Embedded.`);
+          } catch (e) {
+            console.error("Mock embedding simulator failed:", e);
+          }
+        }, 5000);
+      }
 
       return res.status(201).json(asset);
     } catch (error) {
