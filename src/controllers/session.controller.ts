@@ -1,6 +1,8 @@
 import { Response, Request } from "express";
 import { prisma } from "../config/database.js";
+import { env } from "../config/env.js";
 import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
+
 
 export class SessionController {
   // Get active operator's sessions
@@ -225,4 +227,103 @@ export class SessionController {
       return res.status(500).json({ message: "Failed to retrieve messages" });
     }
   }
+
+  // Proxy prompt to n8n webhook and persist to transcript
+  static async sendPrompt(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id: session_id } = req.params;
+      const { prompt, language } = req.body;
+
+      if (!prompt) {
+        return res.status(400).json({ message: "Prompt is required" });
+      }
+
+      const session = await prisma.session.findUnique({
+        where: { id: session_id },
+      });
+      if (!session) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+
+      let replyText = "";
+      let replyId = `ai_reply_${Math.random().toString(36).substring(2, 10)}`;
+
+      if (env.N8N_INTAKE_WEBHOOK) {
+        console.log(`Forwarding prompt for session ${session_id} to n8n: ${env.N8N_INTAKE_WEBHOOK}`);
+        const response = await fetch(env.N8N_INTAKE_WEBHOOK, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-n8n-token": env.N8N_SECRET_TOKEN,
+          },
+          body: JSON.stringify({
+            session_id,
+            prompt,
+            language,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`n8n webhook responded with status: ${response.status}`);
+        }
+
+        const data = (await response.json()) as { text: string };
+        replyText = data.text || "No response text received from the Oracle.";
+      } else {
+        console.warn("N8N_INTAKE_WEBHOOK is not defined. Falling back to local mock chatbot reply.");
+        const en = [
+          "Define the variable you are unwilling to lose. The rest is noise.",
+          "That isn't a decision — it's a description. Make a cut, name a name.",
+          "If this fails, who carries it? Until that answer exists, you are stalling.",
+          "Reframe in one sentence. If you can't, the thesis is not yours yet.",
+        ];
+        const es = [
+          "Defina la variable que no está dispuesto a perder. Lo demás es ruido.",
+          "Eso no es una decisión, es una descripción. Haga un corte, nombre a alguien.",
+          "Si esto falla, ¿quién lo carga? Mientras no haya respuesta, está dilatando.",
+          "Reformúlelo en una frase. Si no puede, la tesis aún no es suya.",
+        ];
+        const pool = language === "es" ? es : en;
+        const seed = (prompt.length + Date.now()) % pool.length;
+        replyText = pool[seed];
+        replyId = `ai_reply_mock_${Math.random().toString(36).substring(2, 10)}`;
+        
+        // Delay to simulate latency in mock mode
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+
+      const reply = {
+        id: replyId,
+        role: "ai-ceo",
+        text: replyText,
+        ts: new Date().toISOString(),
+      };
+
+      // Append user message and AI response to database transcript
+      const userMsg = {
+        id: `msg_user_${Math.random().toString(36).substring(2, 10)}`,
+        role: "user",
+        text: prompt,
+        ts: new Date().toISOString(),
+      };
+
+      const currentTranscript = Array.isArray(session.transcript_payload)
+        ? (session.transcript_payload as any[])
+        : [];
+
+      await prisma.session.update({
+        where: { id: session_id },
+        data: {
+          transcript_payload: [...currentTranscript, userMsg, reply],
+          updated_at: new Date(),
+        },
+      });
+
+      return res.status(200).json(reply);
+    } catch (error) {
+      console.error("Send prompt error:", error);
+      return res.status(500).json({ message: "Failed to communicate with Oracle Workspace" });
+    }
+  }
 }
+
