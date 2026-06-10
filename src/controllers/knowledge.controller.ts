@@ -54,8 +54,9 @@ export class KnowledgeController {
       let assetId: string;
       let asset: any;
 
-      if (env.N8N_INTAKE_WEBHOOK) {
-        console.log(`Notifying n8n at: ${env.N8N_INTAKE_WEBHOOK}`);
+      if (env.N8N_BASE_URL) {
+        const ingestUrl = `${env.N8N_BASE_URL}/webhook/ingest-document`;
+        console.log(`Notifying n8n at: ${ingestUrl}`);
         
         // Construct dynamic absolute URL and callback URL
         const protocol = req.protocol;
@@ -63,7 +64,7 @@ export class KnowledgeController {
         const fileUrl = `${protocol}://${host}/uploads/${file.filename}`;
         const callbackUrl = `${protocol}://${host}/api/knowledge/callback`;
 
-        const n8nResponse = await fetch(env.N8N_INTAKE_WEBHOOK, {
+        const n8nResponse = await fetch(ingestUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

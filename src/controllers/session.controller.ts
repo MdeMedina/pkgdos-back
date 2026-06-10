@@ -248,9 +248,10 @@ export class SessionController {
       let replyText = "";
       let replyId = `ai_reply_${Math.random().toString(36).substring(2, 10)}`;
 
-      if (env.N8N_INTAKE_WEBHOOK) {
-        console.log(`Forwarding prompt for session ${session_id} to n8n: ${env.N8N_INTAKE_WEBHOOK}`);
-        const response = await fetch(env.N8N_INTAKE_WEBHOOK, {
+      if (env.N8N_BASE_URL) {
+        const intakeUrl = `${env.N8N_BASE_URL}/webhook/pkgd/intake`;
+        console.log(`Forwarding prompt for session ${session_id} to n8n: ${intakeUrl}`);
+        const response = await fetch(intakeUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -287,7 +288,7 @@ export class SessionController {
           : "No response text received from the Oracle.";
 
       } else {
-        console.warn("N8N_INTAKE_WEBHOOK is not defined. Falling back to local mock chatbot reply.");
+        console.warn("N8N_BASE_URL is not defined. Falling back to local mock chatbot reply.");
         const en = [
           "Define the variable you are unwilling to lose. The rest is noise.",
           "That isn't a decision — it's a description. Make a cut, name a name.",
