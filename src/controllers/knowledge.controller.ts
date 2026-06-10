@@ -51,65 +51,85 @@ export class KnowledgeController {
         return res.status(400).json({ message: "Brand ID and Asset Type are required" });
       }
 
-      const fileUrl = `/api/knowledge/files/${file.filename}`;
+      let assetId: string;
+      let asset: any;
 
-      const asset = await prisma.knowledgeAsset.create({
-        data: {
-          brand_id,
-          title: title || file.originalname,
-          asset_type: asset_type as AssetType,
-          status: "Active",
-          source_file_url: fileUrl,
-          vectorization_status: "Pending",
-        },
-      });
-
-      console.log(`Document received. Initiated ingestion pipeline for KnowledgeAsset: ${asset.id}`);
-
-      // Notify n8n for chunking and vectorization
       if (env.N8N_INTAKE_WEBHOOK) {
         console.log(`Notifying n8n at: ${env.N8N_INTAKE_WEBHOOK}`);
-        fetch(env.N8N_INTAKE_WEBHOOK, {
+        
+        // Construct dynamic absolute URL and callback URL
+        const protocol = req.protocol;
+        const host = req.get("host");
+        const fileUrl = `${protocol}://${host}/uploads/${file.filename}`;
+        const callbackUrl = `${protocol}://${host}/api/knowledge/callback`;
+
+        const n8nResponse = await fetch(env.N8N_INTAKE_WEBHOOK, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-n8n-token": env.N8N_SECRET_TOKEN,
           },
           body: JSON.stringify({
-            id: asset.id,
-            brand_id: asset.brand_id,
-            title: asset.title,
-            asset_type: asset.asset_type,
-            source_file_url: asset.source_file_url,
-            file_name: file.filename,
-            file_path: file.path,
-            status: asset.status,
-            created_at: asset.created_at,
+            brand_id,
+            title: title || file.originalname,
+            asset_type,
+            source_file_url: fileUrl,
+            callback_url: callbackUrl,
           }),
-        })
-          .then((response) => {
-            if (!response.ok) {
-              console.error(`n8n intake webhook responded with status: ${response.status}`);
-            } else {
-              console.log(`n8n intake webhook notified successfully for asset: ${asset.id}`);
-            }
-          })
-          .catch((err) => {
-            console.error("Failed to call n8n intake webhook:", err);
-          });
+        });
+
+        if (!n8nResponse.ok) {
+          const errMsg = `n8n webhook failed with status ${n8nResponse.status}`;
+          console.error(errMsg);
+          fs.unlinkSync(file.path);
+          return res.status(500).json({ message: errMsg });
+        }
+
+        const data = (await n8nResponse.json()) as { job_id: string; knowledge_asset_id: string; status: string };
+        assetId = data.knowledge_asset_id;
+
+        asset = {
+          id: assetId,
+          brand_id,
+          title: title || file.originalname,
+          asset_type,
+          status: "Active",
+          source_file_url: `/uploads/${file.filename}`, // Return relative path for frontend download API to read locally
+          pgvector_ref_id: null,
+          vectorization_status: "Pending",
+          percent: 0.0,
+          created_at: new Date(),
+        };
       } else {
         console.warn("N8N_INTAKE_WEBHOOK is not defined. Falling back to local mock simulation.");
-        // Simulate asynchronous pgvector embedding/chunking (mock fallback)
+        
+        // Under fallback mock simulation, we insert it manually and simulate progress
+        const localAsset = await prisma.knowledgeAsset.create({
+          data: {
+            brand_id,
+            title: title || file.originalname,
+            asset_type: asset_type as AssetType,
+            status: "Active",
+            source_file_url: `/uploads/${file.filename}`,
+            vectorization_status: "Pending",
+            percent: 0.0,
+          },
+        });
+
+        assetId = localAsset.id;
+        asset = localAsset;
+
         setTimeout(async () => {
           try {
-            const updated = await prisma.knowledgeAsset.update({
-              where: { id: asset.id },
+            await prisma.knowledgeAsset.update({
+              where: { id: assetId },
               data: {
                 vectorization_status: "Embedded",
-                pgvector_ref_id: `pg_vec_${asset.id.substring(0, 8)}`,
+                pgvector_ref_id: `pg_vec_${assetId.substring(0, 8)}`,
+                percent: 100.0,
               },
             });
-            console.log(`Pipeline mock finished. KnowledgeAsset ${updated.id} status transitioned to Embedded.`);
+            console.log(`Pipeline mock finished. KnowledgeAsset ${assetId} status transitioned to Embedded.`);
           } catch (e) {
             console.error("Mock embedding simulator failed:", e);
           }
@@ -120,6 +140,48 @@ export class KnowledgeController {
     } catch (error) {
       console.error("Upload knowledge asset error:", error);
       return res.status(500).json({ message: "Failed to upload and ingest document" });
+    }
+  }
+
+  // Ingest progress callback (n8n Webhook)
+  static async callback(req: Request, res: Response) {
+    try {
+      const { knowledge_asset_id, status, percent } = req.body;
+
+      if (!knowledge_asset_id) {
+        return res.status(400).json({ message: "knowledge_asset_id is required" });
+      }
+
+      const existing = await prisma.knowledgeAsset.findUnique({ where: { id: knowledge_asset_id } });
+      if (!existing) {
+        console.warn(`[Callback] Knowledge asset not found: ${knowledge_asset_id}`);
+        return res.status(404).json({ message: "Knowledge asset not found" });
+      }
+
+      let vectorization_status: VectorizationStatus = "Pending";
+      let finalPercent = percent !== undefined ? parseFloat(percent) : 0;
+
+      if (status === "completed") {
+        vectorization_status = "Embedded";
+        finalPercent = 100;
+      } else if (status === "error") {
+        vectorization_status = "Error";
+      }
+
+      const asset = await prisma.knowledgeAsset.update({
+        where: { id: knowledge_asset_id },
+        data: {
+          vectorization_status,
+          percent: finalPercent,
+        },
+      });
+
+      console.log(`[Callback] Asset ${knowledge_asset_id} updated: status=${vectorization_status}, percent=${finalPercent}%`);
+
+      return res.status(200).json(asset);
+    } catch (error) {
+      console.error("Knowledge status callback error:", error);
+      return res.status(500).json({ message: "Failed to update vectorization progress" });
     }
   }
 

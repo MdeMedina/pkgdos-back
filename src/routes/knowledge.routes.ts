@@ -30,5 +30,6 @@ router.post("/extract", requireAuth, requireAdmin, KnowledgeController.extractGo
 router.get("/:brand_id", requireAuth, KnowledgeController.listByBrand);
 router.get("/:id/download", requireAuth, KnowledgeController.download);
 router.patch("/:id/status", requireN8N, KnowledgeController.statusWebhook);
+router.post("/callback", KnowledgeController.callback);
 
 export default router;
