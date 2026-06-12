@@ -31,5 +31,7 @@ router.get("/:brand_id", requireAuth, KnowledgeController.listByBrand);
 router.get("/:id/download", requireAuth, KnowledgeController.download);
 router.patch("/:id/status", requireN8N, KnowledgeController.statusWebhook);
 router.post("/callback", KnowledgeController.callback);
+router.delete("/:id", requireAuth, requireAdmin, KnowledgeController.delete);
+router.patch("/:id/brand", requireAuth, requireAdmin, KnowledgeController.updateBrand);
 
 export default router;

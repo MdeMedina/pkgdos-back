@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: pkgdos-back
+    restart: always
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./uploads:/app/uploads
+    environment:
+      - PORT=5001
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - N8N_SECRET_TOKEN=${N8N_SECRET_TOKEN}
+      - N8N_BASE_URL=${N8N_BASE_URL}

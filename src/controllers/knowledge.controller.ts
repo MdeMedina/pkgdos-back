@@ -307,4 +307,73 @@ export class KnowledgeController {
       return res.status(500).json({ message: "Failed to download document" });
     }
   }
+
+  // Delete document (and physically from server, cascading doc chunks)
+  static async delete(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const asset = await prisma.knowledgeAsset.findUnique({ where: { id } });
+      
+      if (!asset) {
+        return res.status(404).json({ message: "Knowledge asset not found" });
+      }
+
+      // 1. If physical file exists, delete it from disk
+      if (asset.source_file_url) {
+        // Skip mock files
+        if (!asset.source_file_url.startsWith("/mock/")) {
+          const filename = path.basename(asset.source_file_url);
+          const filePath = path.join("/Users/MiguelMedina/Desktop/Miguel/PKGD/develop/pkgdos-back/uploads", filename);
+          
+          try {
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+              console.log(`Physically unlinked file from server: ${filePath}`);
+            }
+          } catch (err) {
+            console.error(`Failed to physically delete file at ${filePath}:`, err);
+            // Non-blocking: we still want to delete the db records even if the physical file deletion fails
+          }
+        }
+      }
+
+      // 2. Delete the db record (will cascade-delete document_chunks & ingestion_jobs)
+      await prisma.knowledgeAsset.delete({ where: { id } });
+      console.log(`Deleted knowledge asset and all related database records for: ${id}`);
+
+      return res.status(200).json({ message: "Knowledge asset deleted successfully" });
+    } catch (error) {
+      console.error("Delete asset error:", error);
+      return res.status(500).json({ message: "Failed to delete knowledge asset" });
+    }
+  }
+
+  // Update brand association
+  static async updateBrand(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const { brand_id } = req.body;
+
+      if (!brand_id) {
+        return res.status(400).json({ message: "Brand ID is required" });
+      }
+
+      // Verify brand exists
+      const brand = await prisma.brand.findUnique({ where: { id: brand_id } });
+      if (!brand) {
+        return res.status(404).json({ message: "Target brand not found" });
+      }
+
+      const updated = await prisma.knowledgeAsset.update({
+        where: { id },
+        data: { brand_id },
+      });
+
+      console.log(`Reassigned knowledge asset ${id} to brand ${brand_id}`);
+      return res.status(200).json(updated);
+    } catch (error) {
+      console.error("Update asset brand error:", error);
+      return res.status(500).json({ message: "Failed to update asset brand" });
+    }
+  }
 }
