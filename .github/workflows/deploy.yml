@@ -3,7 +3,7 @@ name: Deploy Backend to Production
 on:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   deploy:
@@ -22,14 +22,20 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             cd ${{ secrets.SSH_PATH }}
-            git pull origin main
-            
-            # Build the backend image with new migrations
+            git pull origin master
+
+            # Build the new backend image.
             docker compose build
-            
-            # Run db migrations securely (non-destructive) inside the container
-            docker compose run --rm backend npx prisma migrate deploy
-            
-            # Restart backend container
-            docker compose down
+
+            # Apply Prisma migrations ONLY if a migrations folder exists.
+            # `migrate deploy` is non-destructive (applies versioned migrations,
+            # never resets/drops). No-op today (schema is hand-managed, no
+            # prisma/migrations dir) so it can't break the deploy; auto-runs if
+            # prisma migrations are adopted later.
+            if [ -d prisma/migrations ] && [ -n "$(ls -A prisma/migrations 2>/dev/null)" ]; then
+              docker compose run --rm --no-deps backend npx prisma migrate deploy
+            fi
+
+            # Recreate ONLY the backend service. The DB lives in
+            # docker-compose.db.yml (separate project) and is never touched.
             docker compose up -d

@@ -1,27 +1,23 @@
-FROM node:22-alpine
+FROM node:22-slim
 
-# Install openssl for Prisma compatibility in alpine
-RUN apk add --no-cache openssl
+# OpenSSL para el query engine de Prisma (debian-openssl-3.0.x)
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy package configurations
-COPY package*.json ./
-
-# Install dependencies
+# Install dependencies (incluye dev: tsx, prisma)
+COPY package.json package-lock.json ./
 RUN npm ci
 
-# Copy the rest of the application
-COPY . .
-
-# Generate Prisma Client (build phase, doesn't touch the DB)
+# Prisma client
+COPY prisma ./prisma
 RUN npx prisma generate
 
-# Build TypeScript to Javascript
-RUN npm run build
+# App source
+COPY . .
 
-# Expose backend port
 EXPOSE 5001
 
-# Run in production
-CMD ["npm", "start"]
+# Producción sin compilar: tsx ejecuta TS directamente (sin watch)
+CMD ["npx", "tsx", "src/server.ts"]
