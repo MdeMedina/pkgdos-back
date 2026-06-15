@@ -14,9 +14,10 @@ export interface UserResponseDto {
 }
 
 export function toUserResponseDto(user: any, requestorRole?: GlobalRole): UserResponseDto {
-  // If the user being mapped is an operator OR the logged-in user viewing it is an operator,
-  // we must apply the Operator Blindness rule.
-  const isOperator = requestorRole === "operator" || user.global_role === "operator";
+  // Operator Blindness: an operator must never see friction/calcification scores,
+  // including their own (used by /me). Admins see telemetry for every user —
+  // operator or admin alike — e.g. on /api/users.
+  const blindRequestor = requestorRole === "operator";
 
   const dto: UserResponseDto = {
     id: user.id,
@@ -27,7 +28,7 @@ export function toUserResponseDto(user: any, requestorRole?: GlobalRole): UserRe
     updated_at: user.updated_at.toISOString(),
   };
 
-  if (isOperator) {
+  if (blindRequestor) {
     dto.friction_level = null;
     dto.calcification_level = null;
   } else {
