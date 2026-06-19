@@ -11,6 +11,8 @@ export class UserController {
       const users = await prisma.user.findMany({
         include: {
           brands: true,
+          department: true,
+          department_role: true,
         },
         orderBy: { created_at: "desc" },
       });
@@ -26,7 +28,7 @@ export class UserController {
   // Admin-only operator registration
   static async create(req: AuthenticatedRequest, res: Response) {
     try {
-      const { full_name, email, password, global_role, brand_ids } = req.body;
+      const { full_name, email, password, global_role, brand_ids, department_id, department_role_id } = req.body;
       if (!full_name || !email || !password || !global_role) {
         return res.status(400).json({ message: "Missing required operator fields" });
       }
@@ -52,6 +54,8 @@ export class UserController {
             session_token_n8n: sessionTokenN8n,
             friction_level: 0.0,
             calcification_level: 0.0,
+            department_id: department_id || null,
+            department_role_id: department_role_id || null,
           },
         });
 
@@ -66,7 +70,11 @@ export class UserController {
 
         return tx.user.findUnique({
           where: { id: user.id },
-          include: { brands: true },
+          include: {
+            brands: true,
+            department: true,
+            department_role: true,
+          },
         });
       });
 
@@ -81,7 +89,7 @@ export class UserController {
   static async update(req: AuthenticatedRequest, res: Response) {
     try {
       const { id } = req.params;
-      const { full_name, email, global_role, brand_ids } = req.body;
+      const { full_name, email, global_role, brand_ids, department_id, department_role_id } = req.body;
 
       const user = await prisma.user.findUnique({ where: { id } });
       if (!user) {
@@ -95,6 +103,8 @@ export class UserController {
             full_name: full_name !== undefined ? full_name : undefined,
             email: email !== undefined ? email.toLowerCase() : undefined,
             global_role: global_role !== undefined ? global_role : undefined,
+            department_id: department_id !== undefined ? (department_id || null) : undefined,
+            department_role_id: department_role_id !== undefined ? (department_role_id || null) : undefined,
           },
         });
 
@@ -111,7 +121,11 @@ export class UserController {
 
         return tx.user.findUnique({
           where: { id },
-          include: { brands: true },
+          include: {
+            brands: true,
+            department: true,
+            department_role: true,
+          },
         });
       });
 

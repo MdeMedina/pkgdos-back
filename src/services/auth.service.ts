@@ -16,7 +16,9 @@ export class AuthService {
       include: {
         brands: {
           select: { brand_id: true }
-        }
+        },
+        department: true,
+        department_role: true,
       }
     });
 

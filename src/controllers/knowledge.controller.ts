@@ -14,6 +14,10 @@ export class KnowledgeController {
       const { brand_id } = req.params;
       const assets = await prisma.knowledgeAsset.findMany({
         where: { brand_id },
+        include: {
+          department: true,
+          department_role: true,
+        },
         orderBy: { created_at: "desc" },
       });
       return res.status(200).json(assets);
@@ -23,10 +27,33 @@ export class KnowledgeController {
     }
   }
 
+  // Get knowledge assets by department
+  static async listByDepartment(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { department_id } = req.params;
+      const assets = await prisma.knowledgeAsset.findMany({
+        where: { department_id },
+        include: {
+          department: true,
+          department_role: true,
+        },
+        orderBy: { created_at: "desc" },
+      });
+      return res.status(200).json(assets);
+    } catch (error) {
+      console.error("List knowledge by department error:", error);
+      return res.status(500).json({ message: "Failed to list department assets" });
+    }
+  }
+
   // Get all knowledge assets (admin only)
   static async listAll(req: AuthenticatedRequest, res: Response) {
     try {
       const assets = await prisma.knowledgeAsset.findMany({
+        include: {
+          department: true,
+          department_role: true,
+        },
         orderBy: { created_at: "desc" },
       });
       return res.status(200).json(assets);
@@ -40,16 +67,23 @@ export class KnowledgeController {
   static async upload(req: AuthenticatedRequest, res: Response) {
     try {
       const file = req.file;
-      const { brand_id, asset_type, title } = req.body;
+      const { brand_id, asset_type, title, department_id, department_role_id } = req.body;
 
       if (!file) {
         return res.status(400).json({ message: "No document file was uploaded" });
       }
-      if (!brand_id || !asset_type) {
+      if ((!brand_id && !department_id) || !asset_type) {
         // Cleanup uploaded file if request is bad
         fs.unlinkSync(file.path);
-        return res.status(400).json({ message: "Brand ID and Asset Type are required" });
+        return res.status(400).json({ message: "Brand ID or Department ID, and Asset Type are required" });
       }
+
+      // Enforce that brand documents are strictly not associated with any department,
+      // and department documents are strictly not associated with any brand.
+      const isBrandDoc = !!brand_id;
+      const finalBrandId = isBrandDoc ? brand_id : null;
+      const finalDeptId = isBrandDoc ? null : (department_id || null);
+      const finalRoleId = isBrandDoc ? null : (department_role_id || null);
 
       let assetId: string;
       let asset: any;
@@ -71,11 +105,13 @@ export class KnowledgeController {
             "x-n8n-token": env.N8N_SECRET_TOKEN,
           },
           body: JSON.stringify({
-            brand_id,
+            brand_id: finalBrandId,
             title: title || file.originalname,
             asset_type,
             source_file_url: fileUrl,
             callback_url: callbackUrl,
+            department_id: finalDeptId,
+            department_role_id: finalRoleId,
           }),
         });
 
@@ -91,7 +127,7 @@ export class KnowledgeController {
 
         asset = {
           id: assetId,
-          brand_id,
+          brand_id: finalBrandId,
           title: title || file.originalname,
           asset_type,
           status: "Active",
@@ -99,6 +135,8 @@ export class KnowledgeController {
           pgvector_ref_id: null,
           vectorization_status: "Pending",
           percent: 0.0,
+          department_id: finalDeptId,
+          department_role_id: finalRoleId,
           created_at: new Date(),
         };
       } else {
@@ -107,14 +145,20 @@ export class KnowledgeController {
         // Under fallback mock simulation, we insert it manually and simulate progress
         const localAsset = await prisma.knowledgeAsset.create({
           data: {
-            brand_id,
+            brand_id: finalBrandId,
             title: title || file.originalname,
             asset_type: asset_type as AssetType,
             status: "Active",
             source_file_url: `/uploads/${file.filename}`,
             vectorization_status: "Pending",
             percent: 0.0,
+            department_id: finalDeptId,
+            department_role_id: finalRoleId,
           },
+          include: {
+            department: true,
+            department_role: true,
+          }
         });
 
         assetId = localAsset.id;

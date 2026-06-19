@@ -16,10 +16,14 @@ model User {
   session_token_n8n   String?
   friction_level      Float       @default(0.0)
   calcification_level Float       @default(0.0)
+  department_id       String?     @db.Uuid
+  department_role_id  String?     @db.Uuid
   created_at          DateTime    @default(now())
   updated_at          DateTime    @default(now()) @updatedAt
   sessions            Session[]
   brands              UserBrand[]
+  department          Department? @relation(fields: [department_id], references: [id], onDelete: SetNull)
+  department_role     DepartmentRole? @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
 
   @@map("users")
 }
@@ -78,7 +82,7 @@ model Session {
 
 model KnowledgeAsset {
   id                   String              @id @default(uuid()) @db.Uuid
-  brand_id             String              @db.Uuid
+  brand_id             String?             @db.Uuid
   title                String
   asset_type           AssetType
   status               String              @default("Active")
@@ -88,13 +92,17 @@ model KnowledgeAsset {
   percent              Float               @default(0.0)
   source_session_id    String?             @db.Uuid
   created_at           DateTime            @default(now())
-
-  brand          Brand            @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+ 
+  brand          Brand?           @relation(fields: [brand_id], references: [id], onDelete: Cascade)
   source_session Session?         @relation("KnowledgeSourceSession", fields: [source_session_id], references: [id], onDelete: SetNull)
   chunks         DocumentChunk[]
   
   extracted_from_sessions Session[] @relation("SessionExtractedAsset")
   ingestion_jobs          IngestionJob[]
+  department_id           String?             @db.Uuid
+  department_role_id      String?             @db.Uuid
+  department              Department?         @relation(fields: [department_id], references: [id], onDelete: SetNull)
+  department_role         DepartmentRole?     @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
 
   @@map("knowledge_assets")
 }
@@ -115,6 +123,32 @@ model IngestionJob {
   knowledge_asset    KnowledgeAsset @relation(fields: [knowledge_asset_id], references: [id], onDelete: Cascade)
 
   @@map("ingestion_jobs")
+}
+
+model Department {
+  id               String           @id @default(uuid()) @db.Uuid
+  name             String           @unique
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @default(now()) @updatedAt
+  users            User[]
+  roles            DepartmentRole[]
+  knowledge_assets KnowledgeAsset[]
+
+  @@map("departments")
+}
+
+model DepartmentRole {
+  id               String           @id @default(uuid()) @db.Uuid
+  name             String
+  department_id    String           @db.Uuid
+  department       Department       @relation(fields: [department_id], references: [id], onDelete: Cascade)
+  users            User[]
+  knowledge_assets KnowledgeAsset[]
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @default(now()) @updatedAt
+
+  @@unique([department_id, name])
+  @@map("department_roles")
 }
 
 model DocumentChunk {

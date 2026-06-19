@@ -240,6 +240,14 @@ export class SessionController {
 
       const session = await prisma.session.findUnique({
         where: { id: session_id },
+        include: {
+          user: {
+            include: {
+              department: true,
+              department_role: true,
+            }
+          }
+        }
       });
       if (!session) {
         return res.status(404).json({ message: "Session not found" });
@@ -261,6 +269,10 @@ export class SessionController {
             session_id,
             prompt,
             language,
+            user_department: session.user?.department?.name || null,
+            user_role: session.user?.department_role?.name || null,
+            user_full_name: session.user?.full_name || null,
+            user_email: session.user?.email || null,
           }),
         });
 

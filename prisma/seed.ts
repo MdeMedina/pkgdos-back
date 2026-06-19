@@ -13,9 +13,39 @@ async function main() {
   await prisma.session.deleteMany({});
   await prisma.brand.deleteMany({});
   await prisma.user.deleteMany({});
+  await prisma.departmentRole.deleteMany({});
+  await prisma.department.deleteMany({});
 
   const passwordHash = bcrypt.hashSync("admin", 10);
   const operatorPasswordHash = bcrypt.hashSync("operator123", 10);
+
+  // Seed Departments
+  const marketingDept = await prisma.department.create({
+    data: { name: "Marketing" },
+  });
+  const financeDept = await prisma.department.create({
+    data: { name: "Finanzas" },
+  });
+  const techDept = await prisma.department.create({
+    data: { name: "Tecnología" },
+  });
+  const direccionDept = await prisma.department.create({
+    data: { name: "Dirección" },
+  });
+
+  // Seed Department Roles
+  const marketingManagerRole = await prisma.departmentRole.create({
+    data: { name: "Marketing Manager", department_id: marketingDept.id },
+  });
+  const financialAnalystRole = await prisma.departmentRole.create({
+    data: { name: "Analista Financiero", department_id: financeDept.id },
+  });
+  const techLeadRole = await prisma.departmentRole.create({
+    data: { name: "Desarrollador Lead", department_id: techDept.id },
+  });
+  const directorRole = await prisma.departmentRole.create({
+    data: { name: "Director General", department_id: direccionDept.id },
+  });
 
   // 1. Seed Brands
   const vertebraBrand = await prisma.brand.create({
@@ -58,6 +88,8 @@ async function main() {
       session_token_n8n: "n8n.token.admin123",
       friction_level: 0.0,
       calcification_level: 0.0,
+      department_id: direccionDept.id,
+      department_role_id: directorRole.id,
     },
   });
 
@@ -71,6 +103,8 @@ async function main() {
       session_token_n8n: "n8n.token.helena123",
       friction_level: 62.0,
       calcification_level: 34.0,
+      department_id: marketingDept.id,
+      department_role_id: marketingManagerRole.id,
     },
   });
 
@@ -84,6 +118,8 @@ async function main() {
       session_token_n8n: "n8n.token.marco123",
       friction_level: 81.0,
       calcification_level: 58.0,
+      department_id: financeDept.id,
+      department_role_id: financialAnalystRole.id,
     },
   });
 
@@ -97,6 +133,8 @@ async function main() {
       session_token_n8n: "n8n.token.ana123",
       friction_level: 24.0,
       calcification_level: 12.0,
+      department_id: techDept.id,
+      department_role_id: techLeadRole.id,
     },
   });
 
@@ -217,6 +255,8 @@ async function main() {
       source_file_url: "/mock/vertebra-dogma.pdf",
       pgvector_ref_id: "pg_vec_001",
       vectorization_status: "Embedded",
+      department_id: marketingDept.id,
+      department_role_id: marketingManagerRole.id,
     },
   });
 
@@ -230,6 +270,8 @@ async function main() {
       source_file_url: "/mock/sop-crisis.pdf",
       pgvector_ref_id: "pg_vec_002",
       vectorization_status: "Embedded",
+      department_id: direccionDept.id,
+      department_role_id: directorRole.id,
     },
   });
 

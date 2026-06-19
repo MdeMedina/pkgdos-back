@@ -31,7 +31,9 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       include: {
         brands: {
           select: { brand_id: true }
-        }
+        },
+        department: true,
+        department_role: true,
       }
     });
 

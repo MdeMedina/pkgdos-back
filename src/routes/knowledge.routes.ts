@@ -28,6 +28,7 @@ router.get("/", requireAuth, requireAdmin, KnowledgeController.listAll);
 router.post("/upload", requireAuth, requireAdmin, uploadMiddleware.single("file"), KnowledgeController.upload);
 router.post("/extract", requireAuth, requireAdmin, KnowledgeController.extractGold);
 router.get("/:brand_id", requireAuth, KnowledgeController.listByBrand);
+router.get("/department/:department_id", requireAuth, KnowledgeController.listByDepartment);
 router.get("/:id/download", requireAuth, KnowledgeController.download);
 router.patch("/:id/status", requireN8N, KnowledgeController.statusWebhook);
 router.post("/callback", KnowledgeController.callback);
