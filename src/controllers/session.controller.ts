@@ -255,6 +255,7 @@ export class SessionController {
 
       let replyText = "";
       let replyId = `ai_reply_${Math.random().toString(36).substring(2, 10)}`;
+      let success: any = false;
 
       if (env.N8N_BASE_URL) {
         const intakeUrl = `${env.N8N_BASE_URL}/webhook/pkgd/intake`;
@@ -285,12 +286,16 @@ export class SessionController {
         const root = Array.isArray(parsed) ? parsed[0] : parsed; // tolera [{...}] u {...}
 
         let payload = root?.payload;
+        success = root?.success;
         // Pregunta Sencilla envía payload como string JSON con el texto en .payload
         if (typeof payload === "string" && payload.trim().startsWith("{")) {
           try {
             const inner = JSON.parse(payload);
             if (typeof inner?.payload === 'string') {
               payload = inner.payload;
+            }
+            if (inner?.success !== undefined) {
+              success = inner.success;
             }
           } catch { /* dejar payload tal cual */ }
         }
@@ -322,17 +327,22 @@ export class SessionController {
         await new Promise((resolve) => setTimeout(resolve, 1500));
       }
 
+      const isSuccess = env.N8N_BASE_URL
+        ? (success === true || success === "true")
+        : (prompt.toLowerCase().includes("oro") || prompt.toLowerCase().includes("gold") || prompt.toLowerCase().includes("encauzamiento"));
+
       const reply = {
         id: replyId,
-        role: "ai-ceo",
+        role: "ai-ceo" as const,
         text: replyText,
         ts: new Date().toISOString(),
+        success: isSuccess,
       };
 
       // Append user message and AI response to database transcript
       const userMsg = {
         id: `msg_user_${Math.random().toString(36).substring(2, 10)}`,
-        role: "user",
+        role: "user" as const,
         text: prompt,
         ts: new Date().toISOString(),
       };
@@ -341,10 +351,15 @@ export class SessionController {
         ? (session.transcript_payload as any[])
         : [];
 
+      const shouldClose = isSuccess;
+      const newEncCount = shouldClose ? (session.encauzamiento_count + 1) : session.encauzamiento_count;
+
       await prisma.session.update({
         where: { id: session_id },
         data: {
           transcript_payload: [...currentTranscript, userMsg, reply],
+          status: shouldClose ? "Closed" : session.status,
+          encauzamiento_count: newEncCount,
           updated_at: new Date(),
         },
       });
