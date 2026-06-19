@@ -30,10 +30,19 @@ export class SessionController {
         return res.status(401).json({ message: "Unauthenticated" });
       }
 
-      const { brand_id, title } = req.body;
+      const { brand_id, title, prompt } = req.body;
       if (!title) {
         return res.status(400).json({ message: "Session title is required" });
       }
+
+      const initialTranscript = prompt ? [
+        {
+          id: `msg_user_${Math.random().toString(36).substring(2, 10)}`,
+          role: "user" as const,
+          text: prompt,
+          ts: new Date().toISOString(),
+        }
+      ] : [];
 
       // Inherit initial values from operator profile
       const session = await prisma.session.create({
@@ -50,7 +59,7 @@ export class SessionController {
           coupling_node_triggered: false,
           resolution_status: "Unresolved",
           gold_extraction_status: "None",
-          transcript_payload: [],
+          transcript_payload: initialTranscript,
           glitches: [],
         },
       });
@@ -251,6 +260,9 @@ export class SessionController {
       });
       if (!session) {
         return res.status(404).json({ message: "Session not found" });
+      }
+      if (session.status !== "Open") {
+        return res.status(400).json({ message: "Dialectic session is closed" });
       }
 
       let replyText = "";
