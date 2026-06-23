@@ -5,6 +5,9 @@ import apiRouter from "./routes/index.js";
 
 const app = express();
 
+// Trust reverse proxy to correctly identify protocols (http vs https) behind proxy/Cloudflare
+app.set("trust proxy", true);
+
 // Configure CORS to allow frontend calls
 app.use(
   cors({
@@ -18,7 +21,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve uploads folder static files (for document downloads)
-app.use("/uploads", express.static("/Users/MiguelMedina/Desktop/Miguel/PKGD/develop/pkgdos-back/uploads"));
+app.use("/uploads", express.static(env.UPLOADS_DIR));
 
 // Root API Router
 app.use("/api", apiRouter);

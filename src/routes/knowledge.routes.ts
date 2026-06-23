@@ -3,11 +3,12 @@ import multer from "multer";
 import fs from "node:fs";
 import { KnowledgeController } from "../controllers/knowledge.controller.js";
 import { requireAuth, requireAdmin, requireN8N } from "../middlewares/auth.middleware.js";
+import { env } from "../config/env.js";
 
 const router = Router();
 
 // Setup multer storage for document ingestion
-const uploadDir = "/Users/MiguelMedina/Desktop/Miguel/PKGD/develop/pkgdos-back/uploads";
+const uploadDir = env.UPLOADS_DIR;
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }

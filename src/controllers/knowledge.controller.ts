@@ -343,7 +343,7 @@ export class KnowledgeController {
       }
 
       const filename = path.basename(asset.source_file_url);
-      const filePath = path.join("/Users/MiguelMedina/Desktop/Miguel/PKGD/develop/pkgdos-back/uploads", filename);
+      const filePath = path.join(env.UPLOADS_DIR, filename);
 
       if (!fs.existsSync(filePath)) {
         return res.status(404).json({ message: "Physical file does not exist on disk" });
@@ -372,7 +372,7 @@ export class KnowledgeController {
         // Skip mock files
         if (!asset.source_file_url.startsWith("/mock/")) {
           const filename = path.basename(asset.source_file_url);
-          const filePath = path.join("/Users/MiguelMedina/Desktop/Miguel/PKGD/develop/pkgdos-back/uploads", filename);
+          const filePath = path.join(env.UPLOADS_DIR, filename);
           
           try {
             if (fs.existsSync(filePath)) {
