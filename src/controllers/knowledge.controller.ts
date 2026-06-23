@@ -72,18 +72,23 @@ export class KnowledgeController {
       if (!file) {
         return res.status(400).json({ message: "No document file was uploaded" });
       }
-      if ((!brand_id && !department_id) || !asset_type) {
+      const isExternal = asset_type === "External";
+      if (!asset_type) {
+        fs.unlinkSync(file.path);
+        return res.status(400).json({ message: "Asset Type is required" });
+      }
+      if (!isExternal && !brand_id && !department_id) {
         // Cleanup uploaded file if request is bad
         fs.unlinkSync(file.path);
-        return res.status(400).json({ message: "Brand ID or Department ID, and Asset Type are required" });
+        return res.status(400).json({ message: "Brand ID or Department ID is required for non-External assets" });
       }
 
       // Enforce that brand documents are strictly not associated with any department,
       // and department documents are strictly not associated with any brand.
-      const isBrandDoc = !!brand_id;
-      const finalBrandId = isBrandDoc ? brand_id : null;
-      const finalDeptId = isBrandDoc ? null : (department_id || null);
-      const finalRoleId = isBrandDoc ? null : (department_role_id || null);
+      // And external documents are completely global (no brand, no department).
+      const finalBrandId = isExternal ? null : (brand_id ? brand_id : null);
+      const finalDeptId = isExternal ? null : (brand_id ? null : (department_id || null));
+      const finalRoleId = isExternal ? null : (brand_id ? null : (department_role_id || null));
 
       let assetId: string;
       let asset: any;
@@ -418,6 +423,22 @@ export class KnowledgeController {
     } catch (error) {
       console.error("Update asset brand error:", error);
       return res.status(500).json({ message: "Failed to update asset brand" });
+    }
+  }
+
+  // Get all external knowledge assets
+  static async listExternal(req: AuthenticatedRequest, res: Response) {
+    try {
+      const assets = await prisma.knowledgeAsset.findMany({
+        where: {
+          asset_type: "External",
+        },
+        orderBy: { created_at: "desc" },
+      });
+      return res.status(200).json(assets);
+    } catch (error) {
+      console.error("List external assets error:", error);
+      return res.status(500).json({ message: "Failed to list external assets" });
     }
   }
 }

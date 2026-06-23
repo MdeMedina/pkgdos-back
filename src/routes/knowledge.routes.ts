@@ -27,6 +27,7 @@ const uploadMiddleware = multer({ storage });
 router.get("/", requireAuth, requireAdmin, KnowledgeController.listAll);
 router.post("/upload", requireAuth, requireAdmin, uploadMiddleware.single("file"), KnowledgeController.upload);
 router.post("/extract", requireAuth, requireAdmin, KnowledgeController.extractGold);
+router.get("/external", requireAuth, KnowledgeController.listExternal);
 router.get("/:brand_id", requireAuth, KnowledgeController.listByBrand);
 router.get("/department/:department_id", requireAuth, KnowledgeController.listByDepartment);
 router.get("/:id/download", requireAuth, KnowledgeController.download);
