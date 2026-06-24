@@ -13,7 +13,8 @@ export class KnowledgeController {
     try {
       const { brand_id } = req.params;
       const assets = await prisma.knowledgeAsset.findMany({
-        where: { brand_id },
+        // Only APPROVED assets surface in the brand knowledge base. Proposals (status='Proposed') stay hidden.
+        where: { brand_id, status: "Active" },
         include: {
           department: true,
           department_role: true,
@@ -32,7 +33,7 @@ export class KnowledgeController {
     try {
       const { department_id } = req.params;
       const assets = await prisma.knowledgeAsset.findMany({
-        where: { department_id },
+        where: { department_id, status: "Active" },
         include: {
           department: true,
           department_role: true,
@@ -265,54 +266,164 @@ export class KnowledgeController {
     }
   }
 
-  // Extract gold/jewels from dialectic sessions (admin only)
-  static async extractGold(req: AuthenticatedRequest, res: Response) {
+  // List PENDING proposals (status='Proposed') for admin review. Optional ?type=Gold|Jewel & ?brand_id=
+  static async listProposals(req: AuthenticatedRequest, res: Response) {
     try {
-      const { session_id } = req.body;
-      if (!session_id) {
-        return res.status(400).json({ message: "Session ID is required" });
-      }
+      const { type, brand_id } = req.query as { type?: string; brand_id?: string };
+      const where: any = { status: "Proposed" };
+      if (type === "Gold" || type === "Jewel") where.asset_type = type as AssetType;
+      if (brand_id) where.brand_id = brand_id;
 
-      const session = await prisma.session.findUnique({
-        where: { id: session_id },
+      const proposals = await prisma.knowledgeAsset.findMany({
+        where,
+        include: { brand: true, department: true, department_role: true },
+        orderBy: { created_at: "desc" },
       });
-      if (!session) {
-        return res.status(404).json({ message: "Session not found" });
-      }
-      if (!session.brand_id) {
-        return res.status(400).json({ message: "Session must be linked to a brand to extract assets" });
-      }
-
-      // Create a Gold asset referencing this session
-      const asset = await prisma.$transaction(async (tx) => {
-        const a = await tx.knowledgeAsset.create({
-          data: {
-            brand_id: session.brand_id!,
-            title: `Structural Gold · ${session.title}`,
-            asset_type: "Gold",
-            status: "Active",
-            source_file_url: `/api/knowledge/extracted-transcripts/${session.id}`,
-            vectorization_status: "Embedded",
-            pgvector_ref_id: `pg_vec_${session.id.substring(0, 8)}`,
-            source_session_id: session.id,
-          },
-        });
-
-        await tx.session.update({
-          where: { id: session.id },
-          data: {
-            gold_extraction_status: "Extracted",
-            extracted_asset_id: a.id,
-          },
-        });
-
-        return a;
-      });
-
-      return res.status(200).json({ ok: true, asset });
+      return res.status(200).json(proposals);
     } catch (error) {
-      console.error("Extract gold error:", error);
-      return res.status(500).json({ message: "Failed to extract Structural Gold from session" });
+      console.error("List proposals error:", error);
+      return res.status(500).json({ message: "Failed to list proposals" });
+    }
+  }
+
+  // Admin approves a proposal -> triggers the n8n approval flow (promotes to Active, generates docx, etc.)
+  static async approve(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id } = req.params;
+      const existing = await prisma.knowledgeAsset.findUnique({ where: { id } });
+      if (!existing) {
+        return res.status(404).json({ message: "Knowledge asset not found" });
+      }
+      if (existing.status !== "Proposed") {
+        return res.status(409).json({ message: `Asset is not a pending proposal (status='${existing.status}')` });
+      }
+
+      // Hand off to n8n: it flips status to Active and asks the backend to generate the .docx.
+      const approveUrl = `${env.N8N_BASE_URL}/webhook/pkgd/approve-asset`;
+      let n8nResult: unknown = null;
+      try {
+        const r = await fetch(approveUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-n8n-token": env.N8N_SECRET_TOKEN },
+          body: JSON.stringify({ asset_id: id, approved_by: req.user?.id ?? null }),
+        });
+        if (!r.ok) {
+          const txt = await r.text();
+          console.error(`n8n approve webhook failed (${r.status}): ${txt}`);
+          return res.status(502).json({ message: "Approval workflow failed", detail: txt });
+        }
+        n8nResult = await r.json().catch(() => null);
+      } catch (e) {
+        console.error("Failed to reach n8n approve webhook:", e);
+        return res.status(502).json({ message: "Could not reach approval workflow" });
+      }
+
+      return res.status(200).json({ ok: true, asset_id: id, result: n8nResult });
+    } catch (error) {
+      console.error("Approve asset error:", error);
+      return res.status(500).json({ message: "Failed to approve asset" });
+    }
+  }
+
+  // Generate a .docx of the concept and store it in uploads (multer dir). Called by n8n (requireN8N).
+  static async generateDoc(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const asset = await prisma.knowledgeAsset.findUnique({
+        where: { id },
+        include: { chunks: { orderBy: { id: "asc" } }, brand: true },
+      });
+      if (!asset) {
+        return res.status(404).json({ message: "Knowledge asset not found" });
+      }
+
+      const concept = asset.chunks.map((c) => c.content).join("\n\n").trim();
+      const { Document, Packer, Paragraph, HeadingLevel, TextRun } = await import("docx");
+
+      const bodyParagraphs = (concept || "Sin contenido.")
+        .split(/\n{2,}/)
+        .map((block) =>
+          new Paragraph({
+            children: block.split("\n").map((line, i) =>
+              new TextRun({ text: line, break: i > 0 ? 1 : undefined })
+            ),
+          })
+        );
+
+      const doc = new Document({
+        sections: [
+          {
+            children: [
+              new Paragraph({ text: asset.title, heading: HeadingLevel.HEADING_1 }),
+              new Paragraph({
+                children: [
+                  new TextRun({ italics: true, text: `${asset.asset_type} · ${asset.brand?.name ?? "Sin marca"}` }),
+                ],
+              }),
+              new Paragraph({ text: "" }),
+              ...bodyParagraphs,
+            ],
+          },
+        ],
+      });
+
+      const buffer = await Packer.toBuffer(doc);
+      const safe = asset.title.replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 60) || "concepto";
+      const filename = `${Date.now()}-${safe}.docx`;
+      if (!fs.existsSync(env.UPLOADS_DIR)) fs.mkdirSync(env.UPLOADS_DIR, { recursive: true });
+      fs.writeFileSync(path.join(env.UPLOADS_DIR, filename), buffer);
+
+      const source_file_url = `/uploads/${filename}`;
+      const updated = await prisma.knowledgeAsset.update({
+        where: { id },
+        data: { source_file_url },
+      });
+
+      return res.status(200).json({ ok: true, source_file_url, asset: updated });
+    } catch (error) {
+      console.error("Generate doc error:", error);
+      return res.status(500).json({ message: "Failed to generate document" });
+    }
+  }
+
+  // Admin approves the Gold PROPOSAL produced by a session (replaces the legacy direct extractGold).
+  // Resolves the pending proposal (status='Proposed') linked to the session and hands off to the n8n
+  // approval flow, which promotes it to Active, marks the session, and generates the .docx.
+  static async approveBySession(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { session_id } = req.params;
+
+      const proposal = await prisma.knowledgeAsset.findFirst({
+        where: { source_session_id: session_id, status: "Proposed", asset_type: "Gold" },
+        orderBy: { created_at: "desc" },
+      });
+      if (!proposal) {
+        return res.status(409).json({ message: "No pending Gold proposal for this session" });
+      }
+
+      const approveUrl = `${env.N8N_BASE_URL}/webhook/pkgd/approve-asset`;
+      let n8nResult: unknown = null;
+      try {
+        const r = await fetch(approveUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-n8n-token": env.N8N_SECRET_TOKEN },
+          body: JSON.stringify({ asset_id: proposal.id, approved_by: req.user?.id ?? null }),
+        });
+        if (!r.ok) {
+          const txt = await r.text();
+          console.error(`n8n approve webhook failed (${r.status}): ${txt}`);
+          return res.status(502).json({ message: "Approval workflow failed", detail: txt });
+        }
+        n8nResult = await r.json().catch(() => null);
+      } catch (e) {
+        console.error("Failed to reach n8n approve webhook:", e);
+        return res.status(502).json({ message: "Could not reach approval workflow" });
+      }
+
+      return res.status(200).json({ ok: true, asset_id: proposal.id, result: n8nResult });
+    } catch (error) {
+      console.error("Approve gold by session error:", error);
+      return res.status(500).json({ message: "Failed to approve session gold" });
     }
   }
 
