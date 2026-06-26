@@ -85,6 +85,7 @@ model Session {
   resolution_status              ResolutionStatus     @default(Unresolved)
   integration_signal_received_at DateTime?
   gold_extraction_status         GoldExtractionStatus @default(None)
+  close_reason                   String?
   transcript_payload             Json                 @default("[]")
   glitches                       Json                 @default("[]")
   extracted_asset_id             String?              @db.Uuid

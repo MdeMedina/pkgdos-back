@@ -111,6 +111,12 @@ export class SessionController {
       if (!existing) {
         return res.status(404).json({ message: "Session not found" });
       }
+      // Un cierre por acoplamiento máximo es definitivo: no se puede reabrir.
+      if (existing.close_reason === "coupling_max") {
+        return res.status(403).json({
+          message: "Esta conversación fue cerrada por acoplamiento máximo y no puede reabrirse.",
+        });
+      }
 
       const session = await prisma.session.update({
         where: { id },
