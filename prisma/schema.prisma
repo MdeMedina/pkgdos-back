@@ -22,10 +22,26 @@ model User {
   updated_at          DateTime    @default(now()) @updatedAt
   sessions            Session[]
   brands              UserBrand[]
+  diagnostics         UserDiagnostic[]
   department          Department? @relation(fields: [department_id], references: [id], onDelete: SetNull)
   department_role     DepartmentRole? @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
 
   @@map("users")
+}
+
+model UserDiagnostic {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id           String   @db.Uuid
+  source_session_id String?  @db.Uuid
+  trigger_reason    String
+  summary           String   @default("")
+  payload           Json     @default("{}")
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  user              User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  source_session    Session? @relation("DiagnosticSourceSession", fields: [source_session_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id, created_at(sort: Desc)])
+  @@map("user_diagnostics")
 }
 
 model Brand {
@@ -64,6 +80,8 @@ model Session {
   glitch_count                   Int                  @default(0)
   encauzamiento_count            Int                  @default(0)
   coupling_node_triggered        Boolean              @default(false)
+  coupling_attempts              Int                  @default(0)
+  coupling_active                Boolean              @default(false)
   resolution_status              ResolutionStatus     @default(Unresolved)
   integration_signal_received_at DateTime?
   gold_extraction_status         GoldExtractionStatus @default(None)
@@ -73,6 +91,7 @@ model Session {
   created_at                     DateTime             @default(now())
   updated_at                     DateTime             @default(now()) @updatedAt
   source_knowledge               KnowledgeAsset[]     @relation("KnowledgeSourceSession")
+  diagnostics                    UserDiagnostic[]     @relation("DiagnosticSourceSession")
   brand                          Brand?               @relation(fields: [brand_id], references: [id])
   extracted_asset                KnowledgeAsset?      @relation("SessionExtractedAsset", fields: [extracted_asset_id], references: [id])
   user                           User                 @relation(fields: [user_id], references: [id], onDelete: Cascade)

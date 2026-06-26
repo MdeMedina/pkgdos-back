@@ -186,18 +186,33 @@ export class UserController {
               (glitches.reduce((sum, g) => sum + (g.score || 0), 0) / glitch_count) * 10
             ) / 10;
 
-      // Narrative logic
-      let text = "Operación estable. Fricción dentro de rango, sin glitches críticos. Sin acción requerida.";
+      // El diagnóstico narrativo lo genera el motor n8n (sub-workflow
+      // PKGD - Diagnóstico de Usuario) en cada cierre y se persiste en
+      // user_diagnostics. Tomamos el más reciente. El bloque rule-based de abajo
+      // queda solo como fallback para operadores que aún no tienen diagnóstico.
+      const latest = await prisma.userDiagnostic.findFirst({
+        where: { user_id: id },
+        orderBy: { created_at: "desc" },
+      });
+
+      let fallbackText =
+        "Operación estable. Fricción dentro de rango, sin glitches críticos. Sin acción requerida.";
       if (encauzamiento_count >= 3 && score >= 5) {
-        text = "Operador en encauzamiento sostenido. Capacidad demostrada de cortar el bucle defensivo y nombrar la variable. Apto para extracción de Oro Estructural.";
+        fallbackText =
+          "Operador en encauzamiento sostenido. Capacidad demostrada de cortar el bucle defensivo y nombrar la variable. Apto para extracción de Oro Estructural.";
       } else if (max_friction >= 7 && score < 5) {
-        text = "Alta fricción con baja resolución. El operador resiste el corte; predominan glitches sin reformulación. Intervenir antes de calcificar.";
+        fallbackText =
+          "Alta fricción con baja resolución. El operador resiste el corte; predominan glitches sin reformulación. Intervenir antes de calcificar.";
       } else if (coupling_node_count > 0) {
-        text = "Nodo de acoplamiento activo. La conversación tocó estructura. Monitorear si el próximo intervalo produce encauzamiento.";
+        fallbackText =
+          "Nodo de acoplamiento activo. La conversación tocó estructura. Monitorear si el próximo intervalo produce encauzamiento.";
       }
 
       return res.status(200).json({
-        text,
+        text: latest?.summary?.trim() ? latest.summary : fallbackText,
+        payload: latest?.payload ?? null,
+        generated_at: latest?.created_at ?? null,
+        trigger_reason: latest?.trigger_reason ?? null,
         score,
         max_friction,
         encauzamiento_count,
