@@ -268,6 +268,8 @@ export class SessionController {
       let replyText = "";
       let replyId = `ai_reply_${Math.random().toString(36).substring(2, 10)}`;
       let success: any = false;
+      let concepto: string | null = null;
+      let conceptoTitle = "";
 
       if (env.N8N_BASE_URL) {
         const intakeUrl = `${env.N8N_BASE_URL}/webhook/pkgd/intake`;
@@ -299,6 +301,10 @@ export class SessionController {
 
         let payload = root?.payload;
         success = root?.success;
+        // En el cierre del Oro, Flujo 1 (nodo "Salida cierre") adjunta el concepto
+        // sintetizado para mostrarlo como resumen final de la sesión.
+        concepto = typeof root?.concepto === "string" ? root.concepto : null;
+        conceptoTitle = typeof root?.concepto_title === "string" ? root.concepto_title : "";
         // Pregunta Sencilla envía payload como string JSON con el texto en .payload
         if (typeof payload === "string" && payload.trim().startsWith("{")) {
           try {
@@ -363,20 +369,48 @@ export class SessionController {
         ? (session.transcript_payload as any[])
         : [];
 
+      const usingN8N = !!env.N8N_BASE_URL;
       const shouldClose = isSuccess;
-      const newEncCount = shouldClose ? (session.encauzamiento_count + 1) : session.encauzamiento_count;
+
+      // Resumen de Oro: entrada especial (no es un mensaje del diálogo) que el front
+      // pinta como bloque amarillo al final de la sesión cerrada.
+      const conceptoEntry = (shouldClose && concepto && concepto.trim())
+        ? {
+            id: `concepto_${Math.random().toString(36).substring(2, 10)}`,
+            role: "concepto" as const,
+            text: concepto,
+            title: conceptoTitle,
+            ts: new Date().toISOString(),
+          }
+        : null;
+
+      // El backend SIEMPRE es dueño del transcript. Pero el estado de sesión
+      // (status, encauzamiento_count, gold_extraction_status, extracted_asset_id)
+      // lo persiste n8n de forma autoritativa durante su ejecución. Como aquí
+      // `session` es un snapshot tomado ANTES de llamar a n8n, reescribir esos
+      // contadores los PISA con valores viejos (bug que dejaba encauzamiento_count
+      // en 0 y status en Open tras un cierre). Por eso solo los tocamos en modo
+      // mock (sin n8n); con n8n, únicamente reforzamos el cierre de status.
+      const data: any = {
+        transcript_payload: [...currentTranscript, userMsg, reply, ...(conceptoEntry ? [conceptoEntry] : [])],
+        updated_at: new Date(),
+      };
+      if (!usingN8N) {
+        data.status = shouldClose ? "Closed" : session.status;
+        data.encauzamiento_count = shouldClose
+          ? session.encauzamiento_count + 1
+          : session.encauzamiento_count;
+      } else if (shouldClose) {
+        // n8n ya cerró la sesión; reforzamos status sin tocar los contadores.
+        data.status = "Closed";
+      }
 
       await prisma.session.update({
         where: { id: session_id },
-        data: {
-          transcript_payload: [...currentTranscript, userMsg, reply],
-          status: shouldClose ? "Closed" : session.status,
-          encauzamiento_count: newEncCount,
-          updated_at: new Date(),
-        },
+        data,
       });
 
-      return res.status(200).json(reply);
+      return res.status(200).json(conceptoEntry ? { ...reply, concepto_entry: conceptoEntry } : reply);
     } catch (error) {
       console.error("Send prompt error:", error);
       return res.status(500).json({ message: "Failed to communicate with Oracle Workspace" });
