@@ -30,6 +30,8 @@ router.post("/upload", requireAuth, requireAdmin, uploadMiddleware.single("file"
 router.get("/external", requireAuth, KnowledgeController.listExternal);
 // Admin approves the Gold proposal of a session (replaces legacy /extract). Must precede "/:brand_id".
 router.post("/session/:session_id/approve", requireAuth, requireAdmin, KnowledgeController.approveBySession);
+// Admin approves the Jewel proposal of a session (in-conversation approve button).
+router.post("/session/:session_id/approve-jewel", requireAuth, requireAdmin, KnowledgeController.approveSessionJewel);
 // Pending proposals for admin review — MUST be before "/:brand_id" so it is not swallowed by it.
 router.get("/proposals", requireAuth, requireAdmin, KnowledgeController.listProposals);
 router.get("/:brand_id", requireAuth, KnowledgeController.listByBrand);

@@ -427,6 +427,47 @@ export class KnowledgeController {
     }
   }
 
+  // Admin approves the pending Jewel PROPOSAL of a session (mirror of approveBySession
+  // for asset_type='Jewel'). Same generic approve-asset webhook: promotes to Active,
+  // generates the .docx and flips the session to Extracted.
+  static async approveSessionJewel(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { session_id } = req.params;
+
+      const proposal = await prisma.knowledgeAsset.findFirst({
+        where: { source_session_id: session_id, status: "Proposed", asset_type: "Jewel" },
+        orderBy: { created_at: "desc" },
+      });
+      if (!proposal) {
+        return res.status(409).json({ message: "No pending Jewel proposal for this session" });
+      }
+
+      const approveUrl = `${env.N8N_BASE_URL}/webhook/pkgd/approve-asset`;
+      let n8nResult: unknown = null;
+      try {
+        const r = await fetch(approveUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-n8n-token": env.N8N_SECRET_TOKEN },
+          body: JSON.stringify({ asset_id: proposal.id, approved_by: req.user?.id ?? null }),
+        });
+        if (!r.ok) {
+          const txt = await r.text();
+          console.error(`n8n approve webhook failed (${r.status}): ${txt}`);
+          return res.status(502).json({ message: "Approval workflow failed", detail: txt });
+        }
+        n8nResult = await r.json().catch(() => null);
+      } catch (e) {
+        console.error("Failed to reach n8n approve webhook:", e);
+        return res.status(502).json({ message: "Could not reach approval workflow" });
+      }
+
+      return res.status(200).json({ ok: true, asset_id: proposal.id, result: n8nResult });
+    } catch (error) {
+      console.error("Approve jewel by session error:", error);
+      return res.status(500).json({ message: "Failed to approve session jewel" });
+    }
+  }
+
   // Stream physical document file download
   static async download(req: Request, res: Response) {
     try {
