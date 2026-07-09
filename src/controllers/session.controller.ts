@@ -247,7 +247,7 @@ export class SessionController {
   static async sendPrompt(req: AuthenticatedRequest, res: Response) {
     try {
       const { id: session_id } = req.params;
-      const { prompt, language } = req.body;
+      const { prompt, language, turn_id } = req.body;
 
       if (!prompt) {
         return res.status(400).json({ message: "Prompt is required" });
@@ -288,6 +288,7 @@ export class SessionController {
           },
           body: JSON.stringify({
             session_id,
+            turn_id: turn_id ?? null,
             prompt,
             language,
             user_department: session.user?.department?.name || null,
@@ -420,6 +421,66 @@ export class SessionController {
     } catch (error) {
       console.error("Send prompt error:", error);
       return res.status(500).json({ message: "Failed to communicate with Oracle Workspace" });
+    }
+  }
+
+  // Latest pipeline stage for an in-flight turn (loader progress).
+  // Side channel only — never blocks or alters the prompt response.
+  static async progress(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id: session_id } = req.params;
+      const turn_id = String(req.query.turn_id ?? "");
+      if (!turn_id) {
+        return res.status(400).json({ message: "turn_id is required" });
+      }
+
+      const rows = await prisma.$queryRaw<
+        Array<{ stage: string; label: string; detail: string | null; route: string | null; seq: number; created_at: Date }>
+      >`
+        SELECT stage, label, detail, route, seq, created_at
+        FROM turn_progress
+        WHERE turn_id = ${turn_id}::uuid AND session_id = ${session_id}::uuid
+        ORDER BY seq DESC, created_at DESC
+        LIMIT 1
+      `;
+
+      if (rows.length === 0) {
+        return res.status(200).json({ stage: null });
+      }
+      return res.status(200).json(rows[0]);
+    } catch (error) {
+      // A progress read must never surface as a hard error to the client.
+      console.error("Progress read error:", error);
+      return res.status(200).json({ stage: null });
+    }
+  }
+
+  // Write a pipeline stage for an in-flight turn (called inline by n8n).
+  // Fire-and-forget from n8n's side — must never hard-fail the turn.
+  static async writeProgress(req: Request, res: Response) {
+    try {
+      const { id: session_id } = req.params;
+      const { turn_id, stage, label, detail, route, seq } = req.body ?? {};
+      if (!turn_id || !stage) {
+        return res.status(400).json({ message: "turn_id and stage are required" });
+      }
+      await prisma.$executeRaw`
+        INSERT INTO turn_progress (turn_id, session_id, stage, label, detail, route, seq)
+        VALUES (
+          ${turn_id}::uuid,
+          ${session_id}::uuid,
+          ${String(stage)},
+          ${label != null ? String(label) : String(stage)},
+          ${detail != null ? String(detail) : null},
+          ${route != null ? String(route) : null},
+          ${Number.isFinite(Number(seq)) ? Number(seq) : 0}
+        )
+      `;
+      return res.status(204).end();
+    } catch (error) {
+      // Swallow — a progress write failing must not break the pipeline.
+      console.error("Write progress error:", error);
+      return res.status(200).json({ ok: false });
     }
   }
 }

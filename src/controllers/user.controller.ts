@@ -1,8 +1,47 @@
 import { Response } from "express";
+import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 import { prisma } from "../config/database.js";
+import { env } from "../config/env.js";
 import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
 import { toUserResponseDto } from "../dtos/user.dto.js";
+
+// Envía el correo de activación a través de n8n (nodo Gmail).
+// Nunca lanza: si el correo falla, el alta del operador no debe abortarse.
+async function sendActivationEmail(params: {
+  email: string;
+  full_name: string;
+  token: string;
+}): Promise<boolean> {
+  const link = `${env.APP_BASE_URL}/set-password?token=${params.token}`;
+  try {
+    if (!env.N8N_BASE_URL) {
+      console.warn("N8N_BASE_URL no definido; se omite el correo de activación.");
+      return false;
+    }
+    const url = `${env.N8N_BASE_URL}/webhook/pkgd/send-activation`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-n8n-token": env.N8N_SECRET_TOKEN,
+      },
+      body: JSON.stringify({
+        email: params.email,
+        full_name: params.full_name,
+        link,
+      }),
+    });
+    if (!response.ok) {
+      console.error(`Activation email webhook respondió ${response.status}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Activation email webhook error:", error);
+    return false;
+  }
+}
 
 export class UserController {
   // Admin-only listing of all operators
@@ -28,8 +67,8 @@ export class UserController {
   // Admin-only operator registration
   static async create(req: AuthenticatedRequest, res: Response) {
     try {
-      const { full_name, email, password, global_role, brand_ids, department_id, department_role_id } = req.body;
-      if (!full_name || !email || !password || !global_role) {
+      const { full_name, email, global_role, brand_ids, department_id, department_role_id } = req.body;
+      if (!full_name || !email || !global_role) {
         return res.status(400).json({ message: "Missing required operator fields" });
       }
 
@@ -40,8 +79,13 @@ export class UserController {
         return res.status(400).json({ message: "Operator email already registered" });
       }
 
-      const passwordHash = bcrypt.hashSync(password, 10);
+      // El operador se crea SIN contraseña utilizable: recibe un correo con un token
+      // de activación y define su clave desde el link (auto-login). El password_hash
+      // aleatorio garantiza que no se pueda entrar por login normal hasta activar.
+      const passwordHash = bcrypt.hashSync(crypto.randomBytes(24).toString("hex"), 10);
       const sessionTokenN8n = `n8n.token.${Math.random().toString(36).substring(2, 10)}`;
+      const activationToken = crypto.randomBytes(32).toString("hex");
+      const activationExpires = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48h
 
       // Use a transaction to link brands immediately
       const created = await prisma.$transaction(async (tx) => {
@@ -52,6 +96,8 @@ export class UserController {
             password_hash: passwordHash,
             global_role,
             session_token_n8n: sessionTokenN8n,
+            activation_token: activationToken,
+            activation_expires: activationExpires,
             friction_level: 0.0,
             calcification_level: 0.0,
             department_id: department_id || null,
@@ -78,7 +124,16 @@ export class UserController {
         });
       });
 
-      return res.status(201).json(toUserResponseDto(created, req.user?.global_role));
+      // Disparar el correo de activación (vía n8n/Gmail). No bloquea el alta.
+      const emailSent = await sendActivationEmail({
+        email: created!.email,
+        full_name: created!.full_name,
+        token: activationToken,
+      });
+
+      return res
+        .status(201)
+        .json({ ...toUserResponseDto(created, req.user?.global_role), email_sent: emailSent });
     } catch (error) {
       console.error("Create user error:", error);
       return res.status(500).json({ message: "Failed to register operator" });

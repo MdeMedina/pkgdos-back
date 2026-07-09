@@ -20,6 +20,35 @@ export class AuthController {
     }
   }
 
+  // Public — valida un token de activación y devuelve a quién pertenece la cuenta
+  static async activate(req: any, res: Response) {
+    try {
+      const { token } = req.params;
+      const result = await AuthService.getActivation(token);
+      return res.status(200).json(result);
+    } catch (error: any) {
+      const status = error.status || 500;
+      return res.status(status).json({ message: error.message || "Invalid activation token" });
+    }
+  }
+
+  // Public — fija la contraseña desde el token de activación y auto-loguea
+  static async setPassword(req: any, res: Response) {
+    try {
+      const { token, password } = req.body;
+      if (!token || !password) {
+        return res.status(400).json({ message: "Token and password are required" });
+      }
+
+      const result = await AuthService.setPassword(token, password);
+      return res.status(200).json(result);
+    } catch (error: any) {
+      console.error("Set-password controller error:", error);
+      const status = error.status || 500;
+      return res.status(status).json({ message: error.message || "Failed to set password" });
+    }
+  }
+
   static async me(req: AuthenticatedRequest, res: Response) {
     try {
       if (!req.user) {
