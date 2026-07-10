@@ -46,6 +46,20 @@ model UserDiagnostic {
   @@map("user_diagnostics")
 }
 
+model CompanyDiagnostic {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  period_start DateTime @db.Timestamptz(6)
+  period_end   DateTime @db.Timestamptz(6)
+  summary      String   @default("")
+  mood_label   String?
+  mood_score   Float?
+  payload      Json     @default("{}")
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([created_at(sort: Desc)])
+  @@map("company_diagnostics")
+}
+
 model Brand {
   id               String           @id @default(uuid()) @db.Uuid
   name             String

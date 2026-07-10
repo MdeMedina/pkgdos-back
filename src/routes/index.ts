@@ -5,6 +5,7 @@ import brandRoutes from "./brand.routes.js";
 import sessionRoutes from "./session.routes.js";
 import knowledgeRoutes from "./knowledge.routes.js";
 import departmentRoutes from "./department.routes.js";
+import companyRoutes from "./company.routes.js";
 
 const apiRouter = Router();
 
@@ -14,5 +15,6 @@ apiRouter.use("/brands", brandRoutes);
 apiRouter.use("/sessions", sessionRoutes);
 apiRouter.use("/knowledge", knowledgeRoutes);
 apiRouter.use("/departments", departmentRoutes);
+apiRouter.use("/company", companyRoutes);
 
 export default apiRouter;
