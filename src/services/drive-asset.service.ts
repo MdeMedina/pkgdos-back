@@ -74,6 +74,34 @@ export async function ensureBrandingSubfolder(
   return findOrCreateFolder(sub, brandFolder.id, brandId, brandFolder.full_path);
 }
 
+/**
+ * Ensure every folder along a materialized path exists, creating the missing
+ * segments. Brand tag cascades: each new segment inherits its parent's brand
+ * (root segments relate to PKGD), matching the UI createFolder behavior.
+ * Returns the leaf folder. Throws on an empty path.
+ */
+export async function ensureFolderByPath(fullPath: string) {
+  const segs = String(fullPath || "")
+    .split("/")
+    .map((s) => safeSegment(s))
+    .filter(Boolean);
+  if (!segs.length) throw Object.assign(new Error("full_path is required"), { status: 400 });
+
+  let parentId: string | null = null;
+  let parentFull = "/";
+  let parentBrand: string | null = null;
+  let folder: Awaited<ReturnType<typeof findOrCreateFolder>> | null = null;
+
+  for (const seg of segs) {
+    const brand = parentBrand ?? (await pkgdBrandId());
+    folder = await findOrCreateFolder(seg, parentId, brand, parentFull);
+    parentId = folder.id;
+    parentFull = folder.full_path;
+    parentBrand = folder.brand_id;
+  }
+  return folder!;
+}
+
 /** Build the concept .docx buffer for an asset (title + type/brand line + chunks). */
 async function buildAssetDocx(asset: {
   title: string;
