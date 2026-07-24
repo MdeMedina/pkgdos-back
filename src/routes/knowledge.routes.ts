@@ -42,6 +42,8 @@ router.patch("/:id/status", requireN8N, KnowledgeController.statusWebhook);
 router.post("/:id/approve", requireAuth, requireAdmin, KnowledgeController.approve);
 // n8n asks the backend to render the concept .docx into uploads (multer dir).
 router.post("/:id/generate-doc", requireN8N, KnowledgeController.generateDoc);
+// n8n files a fresh proposal's .docx into /Branding/<marca>/Propuesta/.
+router.post("/:id/file-proposal", requireN8N, KnowledgeController.fileProposal);
 router.post("/callback", KnowledgeController.callback);
 router.delete("/:id", requireAuth, requireAdmin, KnowledgeController.delete);
 router.patch("/:id/brand", requireAuth, requireAdmin, KnowledgeController.updateBrand);

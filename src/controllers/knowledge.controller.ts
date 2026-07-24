@@ -5,6 +5,7 @@ import { prisma } from "../config/database.js";
 import { env } from "../config/env.js";
 import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
 import { AssetType, VectorizationStatus } from "@prisma/client";
+import { placeAssetInBranding } from "../services/drive-asset.service.js";
 
 
 export class KnowledgeController {
@@ -337,6 +338,17 @@ export class KnowledgeController {
         return res.status(404).json({ message: "Knowledge asset not found" });
       }
 
+      // Gold/Jewel approvals: generate + file the doc into /Branding/<marca>/{Oro|Joya}/,
+      // moving it out of /Propuesta/. Delegates rendering to the Drive-asset service.
+      if (asset.asset_type === "Gold" || asset.asset_type === "Jewel") {
+        const sub = asset.asset_type === "Jewel" ? "Joya" : "Oro";
+        const drive_path = await placeAssetInBranding(id, sub, { move: true });
+        const updated = await prisma.knowledgeAsset.findUnique({ where: { id } });
+        return res
+          .status(200)
+          .json({ ok: true, source_file_url: updated?.source_file_url ?? null, drive_path, asset: updated });
+      }
+
       const concept = asset.chunks.map((c) => c.content).join("\n\n").trim();
       const { Document, Packer, Paragraph, HeadingLevel, TextRun } = await import("docx");
 
@@ -383,6 +395,20 @@ export class KnowledgeController {
     } catch (error) {
       console.error("Generate doc error:", error);
       return res.status(500).json({ message: "Failed to generate document" });
+    }
+  }
+
+  // n8n files a freshly-created PROPOSAL (Gold/Jewel, status='Proposed') as a downloadable
+  // .docx under /Branding/<marca>/Propuesta/. Best-effort: never blocks the conversation flow.
+  static async fileProposal(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const drive_path = await placeAssetInBranding(id, "Propuesta", { move: false });
+      return res.status(200).json({ ok: true, drive_path });
+    } catch (error) {
+      const status = (error as { status?: number }).status ?? 500;
+      console.error("File proposal error:", error);
+      return res.status(status).json({ message: "Failed to file proposal doc" });
     }
   }
 
