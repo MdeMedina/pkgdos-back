@@ -6,6 +6,7 @@ import sessionRoutes from "./session.routes.js";
 import knowledgeRoutes from "./knowledge.routes.js";
 import departmentRoutes from "./department.routes.js";
 import companyRoutes from "./company.routes.js";
+import driveRoutes from "./drive.routes.js";
 
 const apiRouter = Router();
 
@@ -16,5 +17,6 @@ apiRouter.use("/sessions", sessionRoutes);
 apiRouter.use("/knowledge", knowledgeRoutes);
 apiRouter.use("/departments", departmentRoutes);
 apiRouter.use("/company", companyRoutes);
+apiRouter.use("/drive", driveRoutes);
 
 export default apiRouter;

@@ -63,3 +63,11 @@ export function requireN8N(req: Request, res: Response, next: NextFunction) {
   }
   next();
 }
+
+// Allows either a logged-in operator (Bearer JWT, for the UI) OR the n8n service
+// token (for agent tools calling read endpoints like the Drive tree).
+export function requireAuthOrN8N(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const token = req.headers["x-n8n-token"];
+  if (token && token === env.N8N_SECRET_TOKEN) return next();
+  return requireAuth(req, res, next);
+}

@@ -8,25 +8,25 @@ datasource db {
 }
 
 model User {
-  id                  String      @id @default(uuid()) @db.Uuid
+  id                  String           @id @default(uuid()) @db.Uuid
   full_name           String
-  email               String      @unique
+  email               String           @unique
   password_hash       String
-  global_role         GlobalRole  @default(operator)
+  global_role         GlobalRole       @default(operator)
   session_token_n8n   String?
-  activation_token    String?     @unique
-  activation_expires  DateTime?   @db.Timestamptz(6)
-  friction_level      Float       @default(0.0)
-  calcification_level Float       @default(0.0)
-  department_id       String?     @db.Uuid
-  department_role_id  String?     @db.Uuid
-  created_at          DateTime    @default(now())
-  updated_at          DateTime    @default(now()) @updatedAt
+  activation_token    String?          @unique
+  activation_expires  DateTime?        @db.Timestamptz(6)
+  friction_level      Float            @default(0.0)
+  calcification_level Float            @default(0.0)
+  department_id       String?          @db.Uuid
+  department_role_id  String?          @db.Uuid
+  created_at          DateTime         @default(now())
+  updated_at          DateTime         @default(now()) @updatedAt
   sessions            Session[]
   brands              UserBrand[]
   diagnostics         UserDiagnostic[]
-  department          Department? @relation(fields: [department_id], references: [id], onDelete: SetNull)
-  department_role     DepartmentRole? @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
+  department          Department?      @relation(fields: [department_id], references: [id], onDelete: SetNull)
+  department_role     DepartmentRole?  @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
 
   @@map("users")
 }
@@ -70,6 +70,8 @@ model Brand {
   knowledge_assets KnowledgeAsset[]
   sessions         Session[]
   users            UserBrand[]
+  drive_folders    DriveFolder[]
+  drive_files      DriveFile[]
 
   @@map("brands")
 }
@@ -128,17 +130,17 @@ model KnowledgeAsset {
   percent              Float               @default(0.0)
   source_session_id    String?             @db.Uuid
   created_at           DateTime            @default(now())
- 
-  brand          Brand?           @relation(fields: [brand_id], references: [id], onDelete: Cascade)
-  source_session Session?         @relation("KnowledgeSourceSession", fields: [source_session_id], references: [id], onDelete: SetNull)
+
+  brand          Brand?          @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+  source_session Session?        @relation("KnowledgeSourceSession", fields: [source_session_id], references: [id], onDelete: SetNull)
   chunks         DocumentChunk[]
-  
-  extracted_from_sessions Session[] @relation("SessionExtractedAsset")
+
+  extracted_from_sessions Session[]       @relation("SessionExtractedAsset")
   ingestion_jobs          IngestionJob[]
-  department_id           String?             @db.Uuid
-  department_role_id      String?             @db.Uuid
-  department              Department?         @relation(fields: [department_id], references: [id], onDelete: SetNull)
-  department_role         DepartmentRole?     @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
+  department_id           String?         @db.Uuid
+  department_role_id      String?         @db.Uuid
+  department              Department?     @relation(fields: [department_id], references: [id], onDelete: SetNull)
+  department_role         DepartmentRole? @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
 
   @@map("knowledge_assets")
 }
@@ -156,7 +158,7 @@ model IngestionJob {
   created_at         DateTime @default(now())
   updated_at         DateTime @default(now()) @updatedAt
 
-  knowledge_asset    KnowledgeAsset @relation(fields: [knowledge_asset_id], references: [id], onDelete: Cascade)
+  knowledge_asset KnowledgeAsset @relation(fields: [knowledge_asset_id], references: [id], onDelete: Cascade)
 
   @@map("ingestion_jobs")
 }
@@ -188,15 +190,69 @@ model DepartmentRole {
 }
 
 model DocumentChunk {
-  id                 String         @id @default(uuid()) @db.Uuid
-  knowledge_asset_id String         @db.Uuid
+  id                 String                       @id @default(uuid()) @db.Uuid
+  knowledge_asset_id String                       @db.Uuid
   content            String
   embedding          Unsupported("vector(1536)")?
-  created_at         DateTime       @default(now())
+  created_at         DateTime                     @default(now())
 
   knowledge_asset KnowledgeAsset @relation(fields: [knowledge_asset_id], references: [id], onDelete: Cascade)
 
   @@map("document_chunks")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Drive: gestor de archivos con Materialized Path (full_path)
+// ─────────────────────────────────────────────────────────────
+
+model DriveFolder {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String
+  parent_id  String?  @db.Uuid
+  full_path  String // materialized path, p.ej. "/Marketing/2026/"
+  brand_id   String?  @db.Uuid
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  parent   DriveFolder?  @relation("FolderTree", fields: [parent_id], references: [id], onDelete: Cascade)
+  children DriveFolder[] @relation("FolderTree")
+  brand    Brand?        @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+  files    DriveFile[]
+
+  @@index([brand_id, parent_id])
+  @@index([full_path])
+  @@map("drive_folders")
+}
+
+model DriveFile {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String
+  url        String // ruta estática pública, p.ej. "/uploads/<uuid>.pdf"
+  mime_type  String
+  size       Int
+  folder_id  String?  @db.Uuid
+  brand_id   String?  @db.Uuid
+  full_path  String // full_path de la carpeta + nombre, inyectado como metadato en la vectorización
+  created_at DateTime @default(now())
+
+  folder DriveFolder?      @relation(fields: [folder_id], references: [id], onDelete: Cascade)
+  brand  Brand?            @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+  chunks FileVectorChunk[]
+
+  @@index([brand_id, folder_id])
+  @@map("drive_files")
+}
+
+model FileVectorChunk {
+  id         String                       @id @default(uuid()) @db.Uuid
+  file_id    String                       @db.Uuid
+  content    String
+  embedding  Unsupported("vector(1536)")?
+  created_at DateTime                     @default(now())
+
+  file DriveFile @relation(fields: [file_id], references: [id], onDelete: Cascade)
+
+  @@map("file_vector_chunks")
 }
 
 enum GlobalRole {
