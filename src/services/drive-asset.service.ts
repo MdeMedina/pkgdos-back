@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "../config/database.js";
 import { env } from "../config/env.js";
+import { buildConceptDocx } from "./markdown-docx.service.js";
 
 /**
  * Files a knowledge asset's concept .docx into the internal Drive tree, under
@@ -109,41 +110,12 @@ async function buildAssetDocx(asset: {
   brand?: { name: string } | null;
   chunks: { content: string }[];
 }): Promise<Buffer> {
-  const concept = asset.chunks.map((c) => c.content).join("\n\n").trim();
-  const { Document, Packer, Paragraph, HeadingLevel, TextRun } = await import("docx");
-
-  const bodyParagraphs = (concept || "Sin contenido.")
-    .split(/\n{2,}/)
-    .map(
-      (block) =>
-        new Paragraph({
-          children: block
-            .split("\n")
-            .map((line, i) => new TextRun({ text: line, break: i > 0 ? 1 : undefined })),
-        })
-    );
-
-  const doc = new Document({
-    sections: [
-      {
-        children: [
-          new Paragraph({ text: asset.title, heading: HeadingLevel.HEADING_1 }),
-          new Paragraph({
-            children: [
-              new TextRun({
-                italics: true,
-                text: `${asset.asset_type} · ${asset.brand?.name ?? "Sin marca"}`,
-              }),
-            ],
-          }),
-          new Paragraph({ text: "" }),
-          ...bodyParagraphs,
-        ],
-      },
-    ],
+  return buildConceptDocx({
+    title: asset.title,
+    subtitle: `${asset.asset_type} · ${asset.brand?.name ?? "Sin marca"}`,
+    // The agents write markdown; buildConceptDocx maps it to real Word structure.
+    markdown: asset.chunks.map((c) => c.content).join("\n\n").trim(),
   });
-
-  return Packer.toBuffer(doc) as unknown as Buffer;
 }
 
 /**

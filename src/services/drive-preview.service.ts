@@ -78,6 +78,36 @@ function bodyFragment(html: string): string {
 }
 
 /**
+ * Turn Tika's list paragraphs into real lists.
+ *
+ * Tika renders every Word list item as `<p class="list_Paragraph">1. text</p>` — it
+ * does not resolve the list format or the sequence, so bullets AND numbered lists
+ * both come out as a literal "1." on every single item (verified against a docx
+ * holding one of each). That synthetic marker is noise, so it is dropped and the
+ * run becomes a <ul>. Consequence worth knowing: a genuinely numbered list in a
+ * third-party document previews as bullets — better than "1. 1. 1.".
+ *
+ * Our own generated documents are unaffected in the other direction: their numbered
+ * steps carry the real number as text in a plain <p>, so they keep 1., 2., 3.
+ */
+const LIST_PARAGRAPH = /<p([^>]*)\bclass="[^"]*list_Paragraph[^"]*"([^>]*)>([\s\S]*?)<\/p>/gi;
+const SYNTHETIC_MARKER = /^(?:\s|&nbsp;)*(?:\d+|[a-z]|[ivx]+)\s*[.)](?:\s|&nbsp;)*/i;
+
+function listifyTikaLists(html: string): string {
+  const withItems = html.replace(LIST_PARAGRAPH, (_m, _a, _b, content: string) => {
+    return `<li>${content.replace(SYNTHETIC_MARKER, "")}</li>`;
+  });
+  return (
+    withItems
+      // Wrap each run of consecutive items in a single <ul>.
+      .replace(/(?:\s*<li>[\s\S]*?<\/li>)+/g, (run) => `<ul>${run}</ul>`)
+      // Tika emits blank paragraphs for spacers and for borders it cannot draw
+      // (a Word horizontal rule arrives as a self-closing <p/>); they add dead space.
+      .replace(/<p[^>]*\/>|<p[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>/gi, "")
+  );
+}
+
+/**
  * Convert a stored file to sanitized preview HTML.
  * `storedUrl` is the DB `url` column ("/uploads/<name>"), resolved against UPLOADS_DIR —
  * only the basename is used, so the URL cannot escape the uploads directory.
@@ -110,7 +140,8 @@ export async function renderPreviewHtml(storedUrl: string, name: string): Promis
     throw new PreviewError(`Preview service returned ${res.status}`);
   }
 
-  const clean = sanitizeHtml(bodyFragment(await res.text()), SANITIZE_OPTIONS).trim();
+  const raw = listifyTikaLists(bodyFragment(await res.text()));
+  const clean = sanitizeHtml(raw, SANITIZE_OPTIONS).trim();
   if (!clean) {
     throw new PreviewError("This document has no extractable content", 422);
   }

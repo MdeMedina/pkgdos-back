@@ -6,6 +6,7 @@ import { env } from "../config/env.js";
 import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
 import { AssetType, VectorizationStatus } from "@prisma/client";
 import { placeAssetInBranding } from "../services/drive-asset.service.js";
+import { buildConceptDocx } from "../services/markdown-docx.service.js";
 
 
 export class KnowledgeController {
@@ -349,37 +350,13 @@ export class KnowledgeController {
           .json({ ok: true, source_file_url: updated?.source_file_url ?? null, drive_path, asset: updated });
       }
 
-      const concept = asset.chunks.map((c) => c.content).join("\n\n").trim();
-      const { Document, Packer, Paragraph, HeadingLevel, TextRun } = await import("docx");
-
-      const bodyParagraphs = (concept || "Sin contenido.")
-        .split(/\n{2,}/)
-        .map((block) =>
-          new Paragraph({
-            children: block.split("\n").map((line, i) =>
-              new TextRun({ text: line, break: i > 0 ? 1 : undefined })
-            ),
-          })
-        );
-
-      const doc = new Document({
-        sections: [
-          {
-            children: [
-              new Paragraph({ text: asset.title, heading: HeadingLevel.HEADING_1 }),
-              new Paragraph({
-                children: [
-                  new TextRun({ italics: true, text: `${asset.asset_type} · ${asset.brand?.name ?? "Sin marca"}` }),
-                ],
-              }),
-              new Paragraph({ text: "" }),
-              ...bodyParagraphs,
-            ],
-          },
-        ],
+      // The agents write markdown; the shared renderer maps it to Word structure
+      // instead of leaving "##" and "**" visible in the document.
+      const buffer = await buildConceptDocx({
+        title: asset.title,
+        subtitle: `${asset.asset_type} · ${asset.brand?.name ?? "Sin marca"}`,
+        markdown: asset.chunks.map((c) => c.content).join("\n\n").trim(),
       });
-
-      const buffer = await Packer.toBuffer(doc);
       const safe = asset.title.replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 60) || "concepto";
       const filename = `${Date.now()}-${safe}.docx`;
       if (!fs.existsSync(env.UPLOADS_DIR)) fs.mkdirSync(env.UPLOADS_DIR, { recursive: true });
