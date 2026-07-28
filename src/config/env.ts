@@ -11,5 +11,8 @@ export const env = {
   APP_BASE_URL: process.env.APP_BASE_URL || "https://os.pkgdgroup.com",
   DATABASE_URL: process.env.DATABASE_URL || "",
   UPLOADS_DIR: process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads"),
+  // Apache Tika, reused from the ingest pipeline to render document previews
+  // (docx/xlsx/pptx/odt/rtf/…). Published on loopback by the n8n compose project.
+  TIKA_URL: process.env.TIKA_URL || "http://127.0.0.1:9998",
 };
 

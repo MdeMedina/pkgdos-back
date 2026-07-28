@@ -33,6 +33,8 @@ router.post("/upload", requireAuth, uploadMiddleware.single("file"), DriveContro
 router.patch("/files/:id", requireAuth, DriveController.updateFile);
 router.delete("/files/:id", requireAuth, DriveController.deleteFile);
 router.get("/files/:id", requireAuth, DriveController.getFile);
+// Sanitized HTML preview for office formats (docx/xlsx/pptx/odt/rtf/…) via Tika.
+router.get("/files/:id/preview", requireAuth, DriveController.previewFile);
 
 // ── AI map + ingest callback ─────────────────────────────
 // GET /drive/tree — whole unified tree for the UI (Drive is one shared space).

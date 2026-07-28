@@ -11,6 +11,7 @@ import {
   repathFolderSubtree,
 } from "../services/drive.service.js";
 import { ensureFolderByPath } from "../services/drive-asset.service.js";
+import { isConvertible, renderPreviewHtml, PreviewError } from "../services/drive-preview.service.js";
 
 /** Absolute base URL (respects reverse proxy) so n8n/Tika can fetch the file. */
 function absoluteBase(req: Request): string {
@@ -384,6 +385,46 @@ export class DriveController {
       console.error("Get file error:", error);
       return res.status(500).json({ message: "Failed to fetch file" });
     }
+  }
+
+  // GET /drive/files/:id/preview — sanitized HTML for formats the browser cannot open
+  // natively (docx, xlsx, pptx, odt, rtf, …), converted by Tika. Small in-memory cache
+  // keyed by file id: uploads are immutable, so a hit is always valid.
+  static async previewFile(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id } = req.params;
+      const cached = DriveController.previewCache.get(id);
+      if (cached) return res.status(200).json({ id, html: cached, cached: true });
+
+      const file = await prisma.driveFile.findUnique({ where: { id } });
+      if (!file) return res.status(404).json({ message: "File not found" });
+      if (!isConvertible(file.mime_type, file.name)) {
+        return res.status(415).json({ message: "No HTML preview for this file type" });
+      }
+
+      const html = await renderPreviewHtml(file.url, file.name);
+      DriveController.rememberPreview(id, html);
+      return res.status(200).json({ id, html, cached: false });
+    } catch (error: any) {
+      if (error instanceof PreviewError) {
+        console.error(`[Drive] preview failed for ${req.params.id}:`, error.message);
+        return res.status(error.status).json({ message: error.message });
+      }
+      console.error("Preview file error:", error);
+      return res.status(500).json({ message: "Failed to render preview" });
+    }
+  }
+
+  // Bounded FIFO cache (id → html). Conversions are CPU-heavy in Tika and files never
+  // change in place, so re-opening a document is free.
+  private static previewCache = new Map<string, string>();
+  private static readonly PREVIEW_CACHE_MAX = 40;
+  private static rememberPreview(id: string, html: string) {
+    if (DriveController.previewCache.size >= DriveController.PREVIEW_CACHE_MAX) {
+      const oldest = DriveController.previewCache.keys().next().value;
+      if (oldest) DriveController.previewCache.delete(oldest);
+    }
+    DriveController.previewCache.set(id, html);
   }
 
   // Propagate a new related brand to a folder subtree. Only rows that still carry `oldBrand`
