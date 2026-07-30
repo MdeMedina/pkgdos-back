@@ -64,6 +64,22 @@ export class AuthController {
     }
   }
 
+  // POST /auth/change-password — el propio operador cambia su clave desde la sesión abierta.
+  static async changePassword(req: AuthenticatedRequest, res: Response) {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ message: "Not authenticated" });
+      }
+      const { current_password, new_password } = req.body ?? {};
+      await AuthService.changePassword(req.user.id, current_password, new_password);
+      return res.status(200).json({ ok: true, message: "Password updated" });
+    } catch (error: any) {
+      const status = error?.status ?? 500;
+      if (status >= 500) console.error("Change password error:", error);
+      return res.status(status).json({ message: error?.message ?? "Failed to change password" });
+    }
+  }
+
   static async logout(req: AuthenticatedRequest, res: Response) {
     return res.status(200).json({ ok: true, message: "Logged out successfully" });
   }

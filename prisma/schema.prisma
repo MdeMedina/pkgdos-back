@@ -25,10 +25,37 @@ model User {
   sessions            Session[]
   brands              UserBrand[]
   diagnostics         UserDiagnostic[]
+  profile             UserProfile?
+  knowledge_assets    KnowledgeAsset[]
   department          Department?      @relation(fields: [department_id], references: [id], onDelete: SetNull)
   department_role     DepartmentRole?  @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
 
   @@map("users")
+}
+
+/// El "about me" del operador: quién es, a qué se dedica dentro de la empresa y cómo quiere
+/// que se le trate. extracted_text es lo que se inyecta en cada turno del agente (por eso vive
+/// en una columna y no sólo en pgvector); el KnowledgeAsset asociado es la copia vectorizada.
+model UserProfile {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id            String   @unique @db.Uuid
+  source_file_url    String
+  source_file_name   String
+  mime_type          String
+  size               Int
+  extracted_text     String   @default("")
+  /// Puntero SUAVE (sin FK) al activo vectorizado: lo crea n8n de forma asíncrona, después de
+  /// responder 202, así que una FK bloquearía este INSERT por orden de llegada. La limpieza del
+  /// perfil anterior se hace por (user_id, asset_type), no por este id.
+  knowledge_asset_id String?  @db.Uuid
+  /// Pending | Embedded | Error — espeja la vectorización del asset.
+  status             String   @default("Pending")
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
 }
 
 model UserDiagnostic {
@@ -137,6 +164,9 @@ model KnowledgeAsset {
 
   extracted_from_sessions Session[]       @relation("SessionExtractedAsset")
   ingestion_jobs          IngestionJob[]
+  /// Sólo para asset_type = UserProfile: el operador dueño del perfil. NULL en todo lo demás.
+  user_id                 String?         @db.Uuid
+  user                    User?           @relation(fields: [user_id], references: [id], onDelete: Cascade)
   department_id           String?         @db.Uuid
   department_role_id      String?         @db.Uuid
   department              Department?     @relation(fields: [department_id], references: [id], onDelete: SetNull)
@@ -324,6 +354,7 @@ enum AssetType {
   Gold
   Jewel
   External
+  UserProfile
 }
 
 enum VectorizationStatus {

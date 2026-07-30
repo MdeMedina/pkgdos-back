@@ -103,6 +103,39 @@ export class AuthService {
   }
 
   /**
+   * Cambia la contraseña de un usuario ya autenticado. Exige la actual: la sesión prueba que
+   * el navegador es suyo, no que la persona frente a la pantalla lo sea.
+   */
+  static async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    if (!currentPassword || !newPassword) {
+      throw Object.assign(new Error("Current and new password are required"), { status: 400 });
+    }
+    if (newPassword.length < 8) {
+      throw Object.assign(new Error("Password must be at least 8 characters"), { status: 400 });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw Object.assign(new Error("Unknown operator"), { status: 401 });
+    }
+    if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
+      throw Object.assign(new Error("Current password is incorrect"), { status: 401 });
+    }
+    if (bcrypt.compareSync(newPassword, user.password_hash)) {
+      throw Object.assign(new Error("The new password must be different"), { status: 400 });
+    }
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { password_hash: bcrypt.hashSync(newPassword, 10) },
+    });
+  }
+
+  /**
    * Emite JWT (24h) y garantiza que el usuario tenga session_token_n8n.
    * Compartido por login y set-password.
    */
