@@ -12,6 +12,14 @@ import {
 } from "../services/drive.service.js";
 import { ensureFolderByPath } from "../services/drive-asset.service.js";
 import { isConvertible, renderPreviewHtml, PreviewError } from "../services/drive-preview.service.js";
+import {
+  addVersion,
+  deleteVersion,
+  listVersions,
+  setCurrentVersion,
+  unlinkVersionFile,
+  VersionError,
+} from "../services/drive-version.service.js";
 
 /** Absolute base URL (respects reverse proxy) so n8n/Tika can fetch the file. */
 function absoluteBase(req: Request): string {
@@ -186,14 +194,20 @@ export class DriveController {
       const folder = await prisma.driveFolder.findUnique({ where: { id } });
       if (!folder) return res.status(404).json({ message: "Folder not found" });
 
-      // Collect every physical file under the subtree before the cascade wipes the rows.
+      // Collect every physical file under the subtree — including every version's binary —
+      // before the cascade wipes the rows.
       const files = await prisma.driveFile.findMany({
         where: { full_path: { startsWith: folder.full_path } },
+        select: { id: true, url: true },
+      });
+      const versions = await prisma.driveFileVersion.findMany({
+        where: { file_id: { in: files.map((f) => f.id) } },
         select: { url: true },
       });
 
       await prisma.driveFolder.delete({ where: { id } }); // FK ON DELETE CASCADE
       files.forEach((f) => unlinkPhysical(f.url));
+      versions.forEach((v) => unlinkVersionFile(v.url));
 
       return res.status(200).json({ message: "Folder and its contents deleted", removed_files: files.length });
     } catch (error: any) {
@@ -267,12 +281,29 @@ export class DriveController {
         },
       });
 
+      // Every upload is a version; the first one is v1 and becomes the current one.
+      const version = await prisma.driveFileVersion.create({
+        data: {
+          file_id: created.id,
+          version: 1,
+          name: file.originalname,
+          url,
+          mime_type: file.mimetype,
+          size: file.size,
+          uploaded_by: req.user?.id ?? null,
+        },
+      });
+      const withVersion = await prisma.driveFile.update({
+        where: { id: created.id },
+        data: { current_version_id: version.id, version_count: 1 },
+      });
+
       // Fire-and-forget async ingest notification to n8n (never blocks the upload response).
-      DriveController.notifyIngest(req, created).catch((e) =>
+      DriveController.notifyIngest(req, withVersion, version).catch((e) =>
         console.error("[Drive] ingest webhook dispatch failed:", e)
       );
 
-      return res.status(201).json(created);
+      return res.status(201).json(withVersion);
     } catch (error) {
       console.error("Upload file error:", error);
       if (file) unlinkPhysical(`/uploads/${file.filename}`);
@@ -281,9 +312,12 @@ export class DriveController {
   }
 
   // POST webhook to n8n so it can download → Tika → chunk → embed → insert into file_vector_chunks.
+  // The chunks are stored against `version_id`, so each version keeps its own vectors and
+  // restoring an older version restores what the agent reads.
   private static async notifyIngest(
     req: Request,
-    file: { id: string; url: string; full_path: string; mime_type: string; name: string; brand_id: string | null }
+    file: { id: string; url: string; full_path: string; mime_type: string; name: string; brand_id: string | null },
+    version: { id: string; version: number; url: string; mime_type: string }
   ) {
     if (!env.N8N_BASE_URL) {
       console.warn("[Drive] N8N_BASE_URL not set; skipping ingest webhook.");
@@ -297,9 +331,11 @@ export class DriveController {
       headers: { "Content-Type": "application/json", "x-n8n-token": env.N8N_SECRET_TOKEN },
       body: JSON.stringify({
         file_id: file.id,
-        url: `${base}${file.url}`, // absolute, so n8n/Tika can fetch it
+        version_id: version.id,
+        version: version.version,
+        url: `${base}${version.url}`, // absolute, so n8n/Tika can fetch it
         full_path: file.full_path,
-        mime_type: file.mime_type,
+        mime_type: version.mime_type,
         name: file.name,
         brand_id: file.brand_id,
         callback_url: `${base}/api/drive/callback`,
@@ -357,17 +393,24 @@ export class DriveController {
     }
   }
 
-  // DELETE /drive/files/:id — removes row (cascades chunks) + physical file
+  // DELETE /drive/files/:id — removes row (cascades versions + chunks) + every version's binary
   static async deleteFile(req: AuthenticatedRequest, res: Response) {
     try {
       const { id } = req.params;
       const file = await prisma.driveFile.findUnique({ where: { id } });
       if (!file) return res.status(404).json({ message: "File not found" });
 
-      await prisma.driveFile.delete({ where: { id } }); // cascades file_vector_chunks
-      unlinkPhysical(file.url);
+      // Collect the binaries of the whole history before the cascade drops the rows.
+      const versions = await prisma.driveFileVersion.findMany({
+        where: { file_id: id },
+        select: { url: true },
+      });
 
-      return res.status(200).json({ message: "File deleted" });
+      await prisma.driveFile.delete({ where: { id } }); // cascades versions + file_vector_chunks
+      unlinkPhysical(file.url);
+      versions.forEach((v) => unlinkVersionFile(v.url));
+
+      return res.status(200).json({ message: "File deleted", removed_versions: versions.length });
     } catch (error) {
       console.error("Delete file error:", error);
       return res.status(500).json({ message: "Failed to delete file" });
@@ -387,24 +430,128 @@ export class DriveController {
     }
   }
 
-  // GET /drive/files/:id/preview — sanitized HTML for formats the browser cannot open
-  // natively (docx, xlsx, pptx, odt, rtf, …), converted by Tika. Small in-memory cache
-  // keyed by file id: uploads are immutable, so a hit is always valid.
+  // ── Versions ────────────────────────────────────────────
+  // Uploading over a file does not overwrite it: it adds a version and points the file at it.
+  // Going back/forward only moves that pointer, so nothing is ever lost.
+
+  // GET /drive/files/:id/versions — history (newest first) + which one is current.
+  static async listFileVersions(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id } = req.params;
+      const file = await prisma.driveFile.findUnique({ where: { id } });
+      if (!file) return res.status(404).json({ message: "File not found" });
+      const versions = await listVersions(id);
+      return res.status(200).json({
+        file_id: file.id,
+        name: file.name,
+        current_version_id: file.current_version_id,
+        version_count: file.version_count,
+        versions,
+      });
+    } catch (error) {
+      console.error("List versions error:", error);
+      return res.status(500).json({ message: "Failed to list versions" });
+    }
+  }
+
+  // POST /drive/files/:id/versions  (multipart: file + { note? }) — new version, becomes current.
+  // The file keeps its Drive name, folder, brand and path: only its content moves forward.
+  static async uploadVersion(req: AuthenticatedRequest, res: Response) {
+    const upload = req.file;
+    try {
+      if (!upload) return res.status(400).json({ message: "No file was uploaded" });
+      const { id } = req.params;
+
+      const version = await addVersion(id, upload, {
+        note: (req.body?.note as string) ?? null,
+        uploaded_by: req.user?.id ?? null,
+      });
+      const file = (await prisma.driveFile.findUnique({ where: { id } }))!;
+
+      // A new version means new content: its own vectors, and the old preview is not it.
+      DriveController.forgetPreview(version.id);
+      DriveController.notifyIngest(req, file, version).catch((e) =>
+        console.error("[Drive] ingest webhook dispatch failed:", e)
+      );
+
+      return res.status(201).json({ file, version });
+    } catch (error: any) {
+      if (upload) unlinkVersionFile(`/uploads/${upload.filename}`);
+      if (error instanceof VersionError) {
+        return res.status(error.status).json({ message: error.message });
+      }
+      console.error("Upload version error:", error);
+      return res.status(500).json({ message: "Failed to upload new version" });
+    }
+  }
+
+  // POST /drive/files/:id/versions/:versionId/current — go back (or forward) to a version.
+  // Non-destructive: the history stays intact and the agent's search follows the pointer.
+  static async restoreVersion(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id, versionId } = req.params;
+      const { file, version } = await setCurrentVersion(id, versionId);
+      return res.status(200).json({ file, version });
+    } catch (error: any) {
+      if (error instanceof VersionError) {
+        return res.status(error.status).json({ message: error.message });
+      }
+      console.error("Restore version error:", error);
+      return res.status(500).json({ message: "Failed to restore version" });
+    }
+  }
+
+  // DELETE /drive/files/:id/versions/:versionId — prune history (never the current version).
+  static async deleteFileVersion(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id, versionId } = req.params;
+      const result = await deleteVersion(id, versionId);
+      DriveController.forgetPreview(versionId);
+      return res.status(200).json({ message: "Version deleted", ...result });
+    } catch (error: any) {
+      if (error instanceof VersionError) {
+        return res.status(error.status).json({ message: error.message });
+      }
+      console.error("Delete version error:", error);
+      return res.status(500).json({ message: "Failed to delete version" });
+    }
+  }
+
+  // GET /drive/files/:id/preview[?version=<version_id>] — sanitized HTML for formats the
+  // browser cannot open natively (docx, xlsx, pptx, odt, rtf, …), converted by Tika.
+  // Without ?version it renders the current version. The cache is keyed by VERSION id:
+  // a version's bytes never change, so a hit is always valid.
   static async previewFile(req: AuthenticatedRequest, res: Response) {
     try {
       const { id } = req.params;
-      const cached = DriveController.previewCache.get(id);
-      if (cached) return res.status(200).json({ id, html: cached, cached: true });
+      const requestedVersion = (req.query.version as string) || null;
 
       const file = await prisma.driveFile.findUnique({ where: { id } });
       if (!file) return res.status(404).json({ message: "File not found" });
-      if (!isConvertible(file.mime_type, file.name)) {
+
+      // Which bytes to convert: the asked-for version, else the current one, else the
+      // file row itself (a pre-versioning row that somehow has no version).
+      let source = { url: file.url, name: file.name, mime: file.mime_type, key: file.current_version_id ?? id };
+      const versionId = requestedVersion ?? file.current_version_id;
+      if (versionId) {
+        const version = await prisma.driveFileVersion.findUnique({ where: { id: versionId } });
+        if (!version || version.file_id !== id) {
+          return res.status(404).json({ message: "Version not found for this file" });
+        }
+        source = { url: version.url, name: version.name, mime: version.mime_type, key: version.id };
+      }
+
+      const cached = DriveController.previewCache.get(source.key);
+      if (cached) {
+        return res.status(200).json({ id, version_id: versionId, html: cached, cached: true });
+      }
+      if (!isConvertible(source.mime, source.name)) {
         return res.status(415).json({ message: "No HTML preview for this file type" });
       }
 
-      const html = await renderPreviewHtml(file.url, file.name);
-      DriveController.rememberPreview(id, html);
-      return res.status(200).json({ id, html, cached: false });
+      const html = await renderPreviewHtml(source.url, source.name);
+      DriveController.rememberPreview(source.key, html);
+      return res.status(200).json({ id, version_id: versionId, html, cached: false });
     } catch (error: any) {
       if (error instanceof PreviewError) {
         console.error(`[Drive] preview failed for ${req.params.id}:`, error.message);
@@ -415,10 +562,13 @@ export class DriveController {
     }
   }
 
-  // Bounded FIFO cache (id → html). Conversions are CPU-heavy in Tika and files never
-  // change in place, so re-opening a document is free.
+  // Bounded FIFO cache (version id → html). Conversions are CPU-heavy in Tika and a
+  // version's bytes never change, so re-opening a document is free.
   private static previewCache = new Map<string, string>();
   private static readonly PREVIEW_CACHE_MAX = 40;
+  private static forgetPreview(key: string) {
+    DriveController.previewCache.delete(key);
+  }
   private static rememberPreview(id: string, html: string) {
     if (DriveController.previewCache.size >= DriveController.PREVIEW_CACHE_MAX) {
       const oldest = DriveController.previewCache.keys().next().value;
@@ -483,6 +633,9 @@ export class DriveController {
             mime_type: true,
             url: true,
             brand_id: true,
+            // The UI badges files that carry history and opens the preview on the current version.
+            version_count: true,
+            current_version_id: true,
           },
           orderBy: { name: "asc" },
         }),
@@ -499,6 +652,8 @@ export class DriveController {
         url: string;
         brand_id: string | null;
         brand_name: string | null;
+        version_count: number;
+        current_version_id: string | null;
       };
       type Node = {
         id: string;
@@ -541,6 +696,8 @@ export class DriveController {
           url: file.url,
           brand_id: file.brand_id,
           brand_name: file.brand_id ? brandName.get(file.brand_id) ?? null : null,
+          version_count: file.version_count,
+          current_version_id: file.current_version_id,
         };
         if (file.folder_id && byId.has(file.folder_id)) byId.get(file.folder_id)!.files.push(entry);
         else rootFiles.push(entry);

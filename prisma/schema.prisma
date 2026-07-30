@@ -227,30 +227,63 @@ model DriveFolder {
 model DriveFile {
   id         String   @id @default(uuid()) @db.Uuid
   name       String
+  // url/mime_type/size ESPEJEAN siempre la versión actual (ver DriveFileVersion), para que
+  // todo consumidor existente (árbol, descargas, herramientas del agente) siga igual.
   url        String // ruta estática pública, p.ej. "/uploads/<uuid>.pdf"
   mime_type  String
   size       Int
   folder_id  String?  @db.Uuid
   brand_id   String?  @db.Uuid
   full_path  String // full_path de la carpeta + nombre, inyectado como metadato en la vectorización
+  // Puntero a la versión vigente. Avanzar/retroceder = mover este puntero (no destructivo).
+  current_version_id String?  @db.Uuid
+  version_count      Int      @default(1)
   created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
-  folder DriveFolder?      @relation(fields: [folder_id], references: [id], onDelete: Cascade)
-  brand  Brand?            @relation(fields: [brand_id], references: [id], onDelete: Cascade)
-  chunks FileVectorChunk[]
+  folder   DriveFolder?       @relation(fields: [folder_id], references: [id], onDelete: Cascade)
+  brand    Brand?             @relation(fields: [brand_id], references: [id], onDelete: Cascade)
+  chunks   FileVectorChunk[]
+  versions DriveFileVersion[]
 
   @@index([brand_id, folder_id])
   @@map("drive_files")
 }
 
+/// Una subida física del archivo. La identidad lógica (nombre, carpeta, marca) vive en
+/// DriveFile; aquí vive el binario de cada versión, su mime/tamaño y quién la subió.
+model DriveFileVersion {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  file_id     String   @db.Uuid
+  version     Int
+  name        String // nombre original del archivo subido en esta versión
+  url         String // ruta física propia de esta versión
+  mime_type   String
+  size        Int
+  note        String?
+  uploaded_by String?  @db.Uuid
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+
+  file   DriveFile         @relation(fields: [file_id], references: [id], onDelete: Cascade)
+  chunks FileVectorChunk[]
+
+  @@unique([file_id, version])
+  @@index([file_id, version(sort: Desc)])
+  @@map("drive_file_versions")
+}
+
 model FileVectorChunk {
   id         String                       @id @default(uuid()) @db.Uuid
   file_id    String                       @db.Uuid
+  // Los chunks pertenecen a UNA versión: al retroceder, el agente vuelve a ver el contenido
+  // anterior sin reingestar. Las búsquedas filtran version_id = drive_files.current_version_id.
+  version_id String?                      @db.Uuid
   content    String
   embedding  Unsupported("vector(1536)")?
   created_at DateTime                     @default(now())
 
-  file DriveFile @relation(fields: [file_id], references: [id], onDelete: Cascade)
+  file    DriveFile         @relation(fields: [file_id], references: [id], onDelete: Cascade)
+  version DriveFileVersion? @relation(fields: [version_id], references: [id], onDelete: Cascade)
 
   @@map("file_vector_chunks")
 }

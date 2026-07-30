@@ -34,7 +34,21 @@ router.patch("/files/:id", requireAuth, DriveController.updateFile);
 router.delete("/files/:id", requireAuth, DriveController.deleteFile);
 router.get("/files/:id", requireAuth, DriveController.getFile);
 // Sanitized HTML preview for office formats (docx/xlsx/pptx/odt/rtf/…) via Tika.
+// ?version=<version_id> previews a point in the history instead of the current version.
 router.get("/files/:id/preview", requireAuth, DriveController.previewFile);
+
+// ── Versions ─────────────────────────────────────────────
+// Uploading over a file adds a version and points the file at it; going back/forward only
+// moves that pointer, so the history (and the agent's view of it) is never destroyed.
+router.get("/files/:id/versions", requireAuth, DriveController.listFileVersions);
+router.post(
+  "/files/:id/versions",
+  requireAuth,
+  uploadMiddleware.single("file"),
+  DriveController.uploadVersion,
+);
+router.post("/files/:id/versions/:versionId/current", requireAuth, DriveController.restoreVersion);
+router.delete("/files/:id/versions/:versionId", requireAuth, DriveController.deleteFileVersion);
 
 // ── AI map + ingest callback ─────────────────────────────
 // GET /drive/tree — whole unified tree for the UI (Drive is one shared space).
