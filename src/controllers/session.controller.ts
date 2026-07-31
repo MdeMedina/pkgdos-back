@@ -276,6 +276,9 @@ export class SessionController {
       let success: any = false;
       let concepto: string | null = null;
       let conceptoTitle = "";
+      // Botones de decisión que el flujo puede adjuntar al turno (p. ej. la Joya
+      // pregunta si seguir afilando o dejarla como propuesta).
+      let actions: Array<{ id: string; label: string; prompt: string; kind?: string }> | null = null;
 
       if (env.N8N_BASE_URL) {
         const intakeUrl = `${env.N8N_BASE_URL}/webhook/pkgd/intake`;
@@ -312,6 +315,20 @@ export class SessionController {
         // sintetizado para mostrarlo como resumen final de la sesión.
         concepto = typeof root?.concepto === "string" ? root.concepto : null;
         conceptoTitle = typeof root?.concepto_title === "string" ? root.concepto_title : "";
+        // `actions` = decisión del usuario por botones. Se sanitiza: sólo entradas
+        // con id/label/prompt de texto llegan al front y al transcript.
+        if (Array.isArray(root?.actions)) {
+          const clean = root.actions
+            .filter((a: any) => a && typeof a.id === "string" && typeof a.label === "string" && typeof a.prompt === "string")
+            .slice(0, 4)
+            .map((a: any) => ({
+              id: a.id,
+              label: a.label,
+              prompt: a.prompt,
+              ...(typeof a.kind === "string" ? { kind: a.kind } : {}),
+            }));
+          actions = clean.length ? clean : null;
+        }
         // Pregunta Sencilla envía payload como string JSON con el texto en .payload
         if (typeof payload === "string" && payload.trim().startsWith("{")) {
           try {
@@ -362,6 +379,7 @@ export class SessionController {
         text: replyText,
         ts: new Date().toISOString(),
         success: isSuccess,
+        ...(actions ? { actions } : {}),
       };
 
       // Append user message and AI response to database transcript
