@@ -14,5 +14,9 @@ export const env = {
   // Apache Tika, reused from the ingest pipeline to render document previews
   // (docx/xlsx/pptx/odt/rtf/…). Published on loopback by the n8n compose project.
   TIKA_URL: process.env.TIKA_URL || "http://127.0.0.1:9998",
+  // Quincenal Pulse — backend de datos propio (Express + SQLite + Windsor.ai),
+  // publicado en loopback por su compose. PKGD OS lo consume vía /api/pulse/*.
+  PULSE_API_URL: process.env.PULSE_API_URL || "http://127.0.0.1:4000",
+  PULSE_API_KEY: process.env.PULSE_API_KEY || "",
 };
 
