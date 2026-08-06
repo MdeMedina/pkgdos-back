@@ -11,7 +11,13 @@ import {
   repathFolderSubtree,
 } from "../services/drive.service.js";
 import { ensureFolderByPath } from "../services/drive-asset.service.js";
-import { isConvertible, renderPreviewHtml, PreviewError } from "../services/drive-preview.service.js";
+import {
+  isConvertible,
+  renderPreviewHtml,
+  renderPreviewHtmlFromBuffer,
+  PreviewError,
+} from "../services/drive-preview.service.js";
+import { download as dropboxDownload, DropboxError } from "../services/dropbox.service.js";
 import {
   addVersion,
   deleteVersion,
@@ -48,6 +54,12 @@ function unlinkPhysical(url: string | null | undefined) {
     console.error(`[Drive] Failed to unlink physical file for ${url}:`, err);
   }
 }
+
+/** Mensaje único para operaciones bloqueadas sobre nodos espejo de Dropbox. */
+const DROPBOX_READONLY = {
+  message:
+    "Este elemento es un espejo de solo lectura de Dropbox. Gestiónalo (renombrar, mover, versionar o eliminar) directamente en Dropbox; el cambio se reflejará aquí automáticamente.",
+};
 
 export class DriveController {
   // ── Folders ─────────────────────────────────────────────
@@ -91,6 +103,7 @@ export class DriveController {
 
       const folder = await prisma.driveFolder.findUnique({ where: { id } });
       if (!folder) return res.status(404).json({ message: "Folder not found" });
+      if (folder.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       const nextName = name !== undefined ? assertValidName(name) : folder.name;
       const nextParentId = parent_id !== undefined ? parent_id : folder.parent_id;
@@ -193,6 +206,7 @@ export class DriveController {
       const { id } = req.params;
       const folder = await prisma.driveFolder.findUnique({ where: { id } });
       if (!folder) return res.status(404).json({ message: "Folder not found" });
+      if (folder.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       // Collect every physical file under the subtree — including every version's binary —
       // before the cascade wipes the rows.
@@ -357,6 +371,7 @@ export class DriveController {
 
       const existing = await prisma.driveFile.findUnique({ where: { id } });
       if (!existing) return res.status(404).json({ message: "File not found" });
+      if (existing.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       const nextName = name !== undefined ? assertValidName(name) : existing.name;
       const nextFolderId = folder_id !== undefined ? folder_id : existing.folder_id;
@@ -399,6 +414,7 @@ export class DriveController {
       const { id } = req.params;
       const file = await prisma.driveFile.findUnique({ where: { id } });
       if (!file) return res.status(404).json({ message: "File not found" });
+      if (file.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       // Collect the binaries of the whole history before the cascade drops the rows.
       const versions = await prisma.driveFileVersion.findMany({
@@ -461,6 +477,12 @@ export class DriveController {
     try {
       if (!upload) return res.status(400).json({ message: "No file was uploaded" });
       const { id } = req.params;
+
+      const target = await prisma.driveFile.findUnique({ where: { id }, select: { source: true } });
+      if (target?.source === "DROPBOX") {
+        unlinkVersionFile(`/uploads/${upload.filename}`);
+        return res.status(409).json(DROPBOX_READONLY);
+      }
 
       const version = await addVersion(id, upload, {
         note: (req.body?.note as string) ?? null,
@@ -549,10 +571,24 @@ export class DriveController {
         return res.status(415).json({ message: "No HTML preview for this file type" });
       }
 
-      const html = await renderPreviewHtml(source.url, source.name);
+      // Archivos de Dropbox: el binario no vive en /uploads. Se descarga de forma efímera
+      // (no se persiste) y se convierte a HTML por Tika desde memoria.
+      let html: string;
+      if (file.source === "DROPBOX") {
+        if (!file.dropbox_id) return res.status(404).json({ message: "Dropbox file id missing" });
+        const { buffer } = await dropboxDownload(file.dropbox_id);
+        html = await renderPreviewHtmlFromBuffer(buffer, source.name);
+      } else {
+        html = await renderPreviewHtml(source.url, source.name);
+      }
       DriveController.rememberPreview(source.key, html);
       return res.status(200).json({ id, version_id: versionId, html, cached: false });
     } catch (error: any) {
+      if (error instanceof DropboxError) {
+        return res.status(error.status || 502).json({
+          message: "No se pudo obtener la vista previa desde Dropbox en este momento.",
+        });
+      }
       if (error instanceof PreviewError) {
         console.error(`[Drive] preview failed for ${req.params.id}:`, error.message);
         return res.status(error.status).json({ message: error.message });
@@ -620,7 +656,7 @@ export class DriveController {
       const [folders, files, brands] = await Promise.all([
         prisma.driveFolder.findMany({
           where,
-          select: { id: true, name: true, parent_id: true, full_path: true, brand_id: true },
+          select: { id: true, name: true, parent_id: true, full_path: true, brand_id: true, source: true },
           orderBy: { full_path: "asc" },
         }),
         prisma.driveFile.findMany({
@@ -636,6 +672,8 @@ export class DriveController {
             // The UI badges files that carry history and opens the preview on the current version.
             version_count: true,
             current_version_id: true,
+            // LOCAL vs DROPBOX: the UI hides the version manager and shows a "Dropbox" badge.
+            source: true,
           },
           orderBy: { name: "asc" },
         }),
@@ -654,6 +692,7 @@ export class DriveController {
         brand_name: string | null;
         version_count: number;
         current_version_id: string | null;
+        source: string;
       };
       type Node = {
         id: string;
@@ -662,6 +701,7 @@ export class DriveController {
         full_path: string;
         brand_id: string | null;
         brand_name: string | null;
+        source: string;
         folders: Node[];
         files: FileNode[];
       };
@@ -676,6 +716,7 @@ export class DriveController {
           full_path: f.full_path,
           brand_id: f.brand_id,
           brand_name: f.brand_id ? brandName.get(f.brand_id) ?? null : null,
+          source: f.source,
           folders: [],
           files: [],
         });
@@ -698,6 +739,7 @@ export class DriveController {
           brand_name: file.brand_id ? brandName.get(file.brand_id) ?? null : null,
           version_count: file.version_count,
           current_version_id: file.current_version_id,
+          source: file.source,
         };
         if (file.folder_id && byId.has(file.folder_id)) byId.get(file.folder_id)!.files.push(entry);
         else rootFiles.push(entry);

@@ -7,6 +7,7 @@ import knowledgeRoutes from "./knowledge.routes.js";
 import departmentRoutes from "./department.routes.js";
 import companyRoutes from "./company.routes.js";
 import driveRoutes from "./drive.routes.js";
+import dropboxRoutes from "./dropbox.routes.js";
 import pulseRoutes from "./pulse.routes.js";
 
 const apiRouter = Router();
@@ -18,6 +19,8 @@ apiRouter.use("/sessions", sessionRoutes);
 apiRouter.use("/knowledge", knowledgeRoutes);
 apiRouter.use("/departments", departmentRoutes);
 apiRouter.use("/company", companyRoutes);
+// Dropbox se monta ANTES que /drive para que su prefijo no lo capture el router de Drive.
+apiRouter.use("/drive/dropbox", dropboxRoutes);
 apiRouter.use("/drive", driveRoutes);
 apiRouter.use("/pulse", pulseRoutes);
 
