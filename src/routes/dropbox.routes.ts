@@ -13,6 +13,9 @@ router.post("/webhook", DropboxController.notify);
 // (el id es un UUID no adivinable) para que <img>/<iframe> lo carguen sin cabeceras.
 router.get("/raw/:id", DropboxController.raw);
 
+// Miniatura JPEG (≤2048px) para la ingesta por visión de imágenes pesadas. Pública como /raw.
+router.get("/thumb/:id", DropboxController.thumb);
+
 // Operación de servicio: bootstrap / reconciliación manual (token de servicio n8n).
 router.post("/sync", requireN8N, DropboxController.sync);
 

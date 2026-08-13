@@ -28,16 +28,21 @@ const SINGLETON = "singleton";
 const ROOT = env.DROPBOX_ROOT_PATH; // "/EXTERNAL DOWNLOADS"
 const ROOT_LOWER = ROOT.toLowerCase();
 
-// Solo estos formatos se envían a la vectorización (tienen texto útil para la búsqueda IA).
-// Imágenes, video, audio y binarios de diseño (.ai/.psd) se espejan y se pueden ver, pero
-// NO se indexan: ahorra descargas efímeras y no satura n8n/Dropbox en el bootstrap.
-const INDEXABLE_EXT = new Set([
+// Documentos con texto → rama Tika del flujo de ingesta n8n.
+const DOC_EXT = new Set([
   ".pdf", ".doc", ".docx", ".txt", ".md", ".rtf", ".csv",
   ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp", ".epub",
 ]);
+// Imágenes que el flujo describe con visión (gpt-5-mini). Solo estos formatos: el IF
+// "Es imagen?" del flujo enruta ^image/(png|jpe?g|gif|webp)$ a visión; otros (svg/tiff/bmp)
+// caerían a Tika y fallarían. Video, audio y binarios de diseño (.ai/.psd) NO se indexan
+// (se espejan y quedan descargables, pero no son buscables por concepto).
+const IMG_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 function isIndexable(name: string): boolean {
   const dot = name.lastIndexOf(".");
-  return dot >= 0 && INDEXABLE_EXT.has(name.slice(dot).toLowerCase());
+  if (dot < 0) return false;
+  const ext = name.slice(dot).toLowerCase();
+  return DOC_EXT.has(ext) || IMG_EXT.has(ext);
 }
 
 // Candado en memoria: los webhooks de Dropbox pueden solaparse; una corrida a la vez.
@@ -249,8 +254,14 @@ async function notifyIngest(
 ) {
   if (!env.N8N_BASE_URL) return;
   const versionId = (await prisma.driveFile.findUnique({ where: { id: fileId } }))?.current_version_id;
-  const tempLink = await getTemporaryLink(entry.id); // enlace directo de descarga (~4h)
   const base = env.APP_BASE_URL;
+  // Imágenes: se describen desde una MINIATURA de Dropbox (~1MB) para no reventar el tope de
+  // tamaño del pipeline de visión con originales de decenas de MB. Documentos: enlace temporal
+  // directo (Tika necesita el binario completo para extraer el texto).
+  const isImg = IMG_EXT.has(entry.name.slice(entry.name.lastIndexOf(".")).toLowerCase());
+  const ingestUrl = isImg
+    ? `${base}/api/drive/dropbox/thumb/${fileId}`
+    : await getTemporaryLink(entry.id);
   const res = await fetch(`${env.N8N_BASE_URL}/webhook/drive-file-ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-n8n-token": env.N8N_SECRET_TOKEN },
@@ -258,7 +269,7 @@ async function notifyIngest(
       file_id: fileId,
       version_id: versionId,
       version: 1,
-      url: tempLink,
+      url: ingestUrl,
       full_path: fullPath,
       mime_type: mime,
       name: entry.name,

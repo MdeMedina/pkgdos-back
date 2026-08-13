@@ -208,6 +208,37 @@ export async function download(pathOrId: string): Promise<{ buffer: Buffer; name
 }
 
 /**
+ * Miniatura JPEG generada por Dropbox (≤2048px). Ideal para la descripción por visión:
+ * pesa ~1MB aunque el original sean 40MB, así el modelo la procesa sin reventar el tope de
+ * tamaño. El binario original NO se descarga. Dropbox genera el thumbnail sin importar el
+ * peso del archivo fuente.
+ */
+export async function getThumbnail(pathOrId: string): Promise<Buffer> {
+  const token = await getAccessToken();
+  const arg = {
+    resource: { ".tag": "path", path: pathOrId },
+    format: "jpeg",
+    size: "w2048h1536",
+    mode: "fitone_bestfit",
+  };
+  let res: globalThis.Response;
+  try {
+    res = await fetch(`${CONTENT_BASE}/files/get_thumbnail_v2`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Dropbox-API-Arg": JSON.stringify(arg) },
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (err: any) {
+    throw new DropboxError(`Dropbox no responde (thumbnail): ${err?.message ?? "red"}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new DropboxError(`Dropbox get_thumbnail devolvió ${res.status}: ${text}`, res.status);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
  * Verifica la firma del webhook: HMAC-SHA256 del cuerpo crudo con el APP_SECRET.
  * Comparación en tiempo constante para no filtrar información por timing.
  */

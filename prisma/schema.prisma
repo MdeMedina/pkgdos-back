@@ -279,6 +279,9 @@ model DriveFile {
   // DROPBOX = el binario vive SOLO en Dropbox; `url` apunta a nuestro redirect 302 (enlace
   // invisible) y el gestor de versiones interno queda deshabilitado (se usa el de Dropbox).
   source               DriveSource @default(LOCAL)
+  // Jerarquía ante el agente. RECTOR = siempre en contexto cuando se habla de su marca.
+  // NORMAL (default) = solo aparece si la búsqueda vectorial lo trae ante una petición.
+  doc_tier             DocTier @default(NORMAL)
   dropbox_id           String? @unique // id estable del archivo en Dropbox ("id:...")
   dropbox_path_lower   String? // ruta case-insensitive, para borrados por path del webhook
   dropbox_rev          String? // rev actual; si cambia => reingestar vectores
@@ -351,6 +354,14 @@ model DropboxSyncState {
 enum DriveSource {
   LOCAL
   DROPBOX
+}
+
+// Jerarquía de un documento del Drive ante el agente.
+// RECTOR: rige la marca, se inyecta SIEMPRE que se habla de ella.
+// NORMAL: se activa solo cuando la búsqueda vectorial lo recupera.
+enum DocTier {
+  RECTOR
+  NORMAL
 }
 
 enum GlobalRole {

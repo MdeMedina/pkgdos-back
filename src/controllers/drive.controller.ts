@@ -282,6 +282,8 @@ export class DriveController {
       const brand_id = req.body.brand_id || folderBrandId || (await pkgdBrandId());
       const url = `/uploads/${file.filename}`;
       const full_path = computeFilePath(folderPath, file.originalname);
+      // Jerarquía ante el agente: RECTOR (siempre en contexto de su marca) o NORMAL (default).
+      const doc_tier = req.body.doc_tier === "RECTOR" ? "RECTOR" : "NORMAL";
 
       const created = await prisma.driveFile.create({
         data: {
@@ -292,6 +294,7 @@ export class DriveController {
           folder_id,
           brand_id,
           full_path,
+          doc_tier,
         },
       });
 
@@ -443,6 +446,85 @@ export class DriveController {
     } catch (error) {
       console.error("Get file error:", error);
       return res.status(500).json({ message: "Failed to fetch file" });
+    }
+  }
+
+  // PATCH /drive/files/:id/tier  { doc_tier: "RECTOR" | "NORMAL" }
+  // Cambiar la jerarquía es metadato NUESTRO: se permite también en archivos DROPBOX
+  // (no muta nada en Dropbox, no desincroniza el espejo).
+  static async setTier(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id } = req.params;
+      const tier = req.body?.doc_tier;
+      if (tier !== "RECTOR" && tier !== "NORMAL") {
+        return res.status(400).json({ message: 'doc_tier debe ser "RECTOR" o "NORMAL"' });
+      }
+      const existing = await prisma.driveFile.findUnique({ where: { id }, select: { id: true } });
+      if (!existing) return res.status(404).json({ message: "File not found" });
+      const updated = await prisma.driveFile.update({ where: { id }, data: { doc_tier: tier } });
+      return res.status(200).json({ id: updated.id, doc_tier: updated.doc_tier });
+    } catch (error: any) {
+      console.error("Set tier error:", error);
+      return res.status(500).json({ message: "Failed to set document tier" });
+    }
+  }
+
+  // GET /drive/rectores/:brand_id  (requireAuthOrN8N)
+  // Documentos RECTORES de la marca: van SIEMPRE al contexto del agente (no dependen de la
+  // búsqueda vectorial). Reconstruye el texto de cada rector concatenando sus chunks de la
+  // versión vigente. ACOTADO por presupuesto de caracteres para no re-inflar el prompt.
+  static async rectores(req: Request, res: Response) {
+    try {
+      const { brand_id } = req.params;
+      const CHAR_BUDGET = 60_000; // ~15k tokens tope duro para el conjunto de rectores
+
+      const files = await prisma.driveFile.findMany({
+        where: { brand_id, doc_tier: "RECTOR" },
+        select: { id: true, name: true, full_path: true, url: true, current_version_id: true },
+        orderBy: { name: "asc" },
+      });
+
+      const docs: Array<{ id: string; name: string; full_path: string; url: string; content: string; truncated: boolean }> = [];
+      let used = 0;
+      let budgetHit = false;
+      for (const f of files) {
+        if (used >= CHAR_BUDGET) {
+          budgetHit = true;
+          break;
+        }
+        // Texto = chunks de la versión vigente, en orden de creación.
+        const chunks = await prisma.fileVectorChunk.findMany({
+          where: {
+            file_id: f.id,
+            OR: [{ version_id: null }, { version_id: f.current_version_id }],
+          },
+          select: { content: true },
+          orderBy: { created_at: "asc" },
+        });
+        let content = chunks.map((c) => c.content).join("\n").trim();
+        let truncated = false;
+        const remaining = CHAR_BUDGET - used;
+        if (content.length > remaining) {
+          content = content.slice(0, remaining);
+          truncated = true;
+          budgetHit = true;
+        }
+        used += content.length;
+        docs.push({ id: f.id, name: f.name, full_path: f.full_path, url: f.url, content, truncated });
+      }
+
+      return res.status(200).json({
+        brand_id,
+        count: docs.length,
+        total_rectores: files.length,
+        char_budget: CHAR_BUDGET,
+        chars_used: used,
+        budget_hit: budgetHit,
+        docs,
+      });
+    } catch (error) {
+      console.error("Rectores error:", error);
+      return res.status(500).json({ message: "Failed to load rector documents" });
     }
   }
 
@@ -639,27 +721,58 @@ export class DriveController {
 
   // GET /drive/tree — WHOLE unified tree (the Drive is one shared space; folders carry an
   // optional related brand). Used by the UI.
-  static async treeAll(_req: Request, res: Response) {
-    return DriveController.buildTree(res, undefined);
+  // Query opcional (usada por la herramienta del agente para NO volcar todo el Drive):
+  //   ?files=false   → solo el esqueleto de carpetas (omite los archivos)
+  //   ?depth=N       → limita la profundidad de carpetas (N niveles desde la raíz)
+  //   ?path=/pref/   → solo el subárbol bajo esa ruta (para "bajar" a una carpeta)
+  static async treeAll(req: Request, res: Response) {
+    return DriveController.buildTree(res, undefined, DriveController.parseTreeOpts(req));
   }
 
   // GET /drive/tree/:brand_id — tree filtered by related brand (used by the n8n agent tool).
   static async tree(req: Request, res: Response) {
-    return DriveController.buildTree(res, req.params.brand_id);
+    return DriveController.buildTree(res, req.params.brand_id, DriveController.parseTreeOpts(req));
+  }
+
+  private static parseTreeOpts(req: Request): { includeFiles: boolean; depth: number | null; path: string | null } {
+    // El agente (token n8n) no debe recibir el Drive entero: por defecto le damos SOLO el
+    // esqueleto de carpetas hasta 3 niveles (~50KB en vez de ~2.4MB), lo que evita reventar
+    // el context window del modelo. La UI (JWT de operador) sigue recibiendo el árbol completo.
+    // Cualquier parámetro explícito (?files=/?depth=/?path=) tiene prioridad para ambos.
+    const isAgent = req.headers["x-n8n-token"] === env.N8N_SECRET_TOKEN;
+    const hasFiles = req.query.files !== undefined;
+    const hasDepth = req.query.depth !== undefined;
+
+    const includeFiles = hasFiles ? req.query.files !== "false" : !isAgent;
+    const depthRaw = parseInt((req.query.depth as string) || "", 10);
+    const depth = Number.isFinite(depthRaw) && depthRaw > 0 ? depthRaw : isAgent && !hasDepth ? 3 : null;
+    const path = typeof req.query.path === "string" && req.query.path ? req.query.path : null;
+    return { includeFiles, depth, path };
   }
 
   // Shared builder. `brandFilter` undefined => everything; otherwise scoped to that related brand.
-  private static async buildTree(res: Response, brandFilter: string | undefined) {
+  // `opts` acota el resultado (ver parseTreeOpts). Defaults = árbol completo (comportamiento previo).
+  private static async buildTree(
+    res: Response,
+    brandFilter: string | undefined,
+    opts: { includeFiles: boolean; depth: number | null; path: string | null } = {
+      includeFiles: true,
+      depth: null,
+      path: null,
+    }
+  ) {
     try {
-      const where = brandFilter ? { brand_id: brandFilter } : {};
+      const where: any = brandFilter ? { brand_id: brandFilter } : {};
+      if (opts.path) where.full_path = { startsWith: opts.path };
 
-      const [folders, files, brands] = await Promise.all([
+      const [foldersRaw, filesRaw, brands] = await Promise.all([
         prisma.driveFolder.findMany({
           where,
           select: { id: true, name: true, parent_id: true, full_path: true, brand_id: true, source: true },
           orderBy: { full_path: "asc" },
         }),
-        prisma.driveFile.findMany({
+        opts.includeFiles
+          ? prisma.driveFile.findMany({
           where,
           select: {
             id: true,
@@ -674,12 +787,24 @@ export class DriveController {
             current_version_id: true,
             // LOCAL vs DROPBOX: the UI hides the version manager and shows a "Dropbox" badge.
             source: true,
+            // RECTOR vs NORMAL: the UI shows a "Rector" badge and the tier toggle.
+            doc_tier: true,
           },
           orderBy: { name: "asc" },
-        }),
+            })
+          : Promise.resolve([] as any[]),
         prisma.brand.findMany({ select: { id: true, name: true } }),
       ]);
       const brandName = new Map(brands.map((b) => [b.id, b.name]));
+
+      // Acotar por profundidad: conserva carpetas hasta `depth` niveles; los archivos solo
+      // si su carpeta sobrevivió (o son de raíz). Esto evita volcar todo el Drive al agente.
+      const depthOf = (fp: string) => fp.split("/").filter(Boolean).length;
+      const folders = opts.depth ? foldersRaw.filter((f) => depthOf(f.full_path) <= opts.depth!) : foldersRaw;
+      const keptFolderIds = new Set(folders.map((f) => f.id));
+      const files = opts.depth
+        ? filesRaw.filter((f: any) => !f.folder_id || keptFolderIds.has(f.folder_id))
+        : filesRaw;
 
       type FileNode = {
         id: string;
@@ -693,6 +818,7 @@ export class DriveController {
         version_count: number;
         current_version_id: string | null;
         source: string;
+        doc_tier: string;
       };
       type Node = {
         id: string;
@@ -740,6 +866,7 @@ export class DriveController {
           version_count: file.version_count,
           current_version_id: file.current_version_id,
           source: file.source,
+          doc_tier: file.doc_tier,
         };
         if (file.folder_id && byId.has(file.folder_id)) byId.get(file.folder_id)!.files.push(entry);
         else rootFiles.push(entry);

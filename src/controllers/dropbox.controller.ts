@@ -1,7 +1,12 @@
 import { Request, Response } from "express";
 import { prisma } from "../config/database.js";
 import { dropboxEnabled } from "../config/env.js";
-import { DropboxError, getTemporaryLink, verifyWebhookSignature } from "../services/dropbox.service.js";
+import {
+  DropboxError,
+  getTemporaryLink,
+  getThumbnail,
+  verifyWebhookSignature,
+} from "../services/dropbox.service.js";
 import { syncDropbox } from "../services/dropbox-sync.service.js";
 
 /**
@@ -58,6 +63,31 @@ export class DropboxController {
       }
       console.error("[Dropbox] raw redirect error:", error);
       return res.status(500).json({ message: "Error al resolver el archivo de Dropbox" });
+    }
+  }
+
+  // GET /api/drive/dropbox/thumb/:id  (público, como /raw)
+  // Devuelve una miniatura JPEG (≤2048px) generada por Dropbox. La usa la ingesta por visión
+  // para describir imágenes pesadas sin descargar el original (que puede pesar decenas de MB).
+  static async thumb(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const file = await prisma.driveFile.findUnique({ where: { id } });
+      if (!file || file.source !== "DROPBOX" || !file.dropbox_id) {
+        return res.status(404).json({ message: "Imagen de Dropbox no encontrada" });
+      }
+      const buf = await getThumbnail(file.dropbox_id);
+      res.set("Content-Type", "image/jpeg");
+      res.set("Cache-Control", "private, max-age=3600");
+      return res.status(200).send(buf);
+    } catch (error: any) {
+      if (error instanceof DropboxError) {
+        return res.status(error.status || 502).json({
+          message: "No se pudo obtener la miniatura desde Dropbox en este momento.",
+        });
+      }
+      console.error("[Dropbox] thumb error:", error);
+      return res.status(500).json({ message: "Error al obtener la miniatura de Dropbox" });
     }
   }
 
