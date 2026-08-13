@@ -11,7 +11,13 @@ import {
   repathFolderSubtree,
 } from "../services/drive.service.js";
 import { ensureFolderByPath } from "../services/drive-asset.service.js";
-import { isConvertible, renderPreviewHtml, PreviewError } from "../services/drive-preview.service.js";
+import {
+  isConvertible,
+  renderPreviewHtml,
+  renderPreviewHtmlFromBuffer,
+  PreviewError,
+} from "../services/drive-preview.service.js";
+import { download as dropboxDownload, DropboxError } from "../services/dropbox.service.js";
 import {
   addVersion,
   deleteVersion,
@@ -48,6 +54,12 @@ function unlinkPhysical(url: string | null | undefined) {
     console.error(`[Drive] Failed to unlink physical file for ${url}:`, err);
   }
 }
+
+/** Mensaje único para operaciones bloqueadas sobre nodos espejo de Dropbox. */
+const DROPBOX_READONLY = {
+  message:
+    "Este elemento es un espejo de solo lectura de Dropbox. Gestiónalo (renombrar, mover, versionar o eliminar) directamente en Dropbox; el cambio se reflejará aquí automáticamente.",
+};
 
 export class DriveController {
   // ── Folders ─────────────────────────────────────────────
@@ -91,6 +103,7 @@ export class DriveController {
 
       const folder = await prisma.driveFolder.findUnique({ where: { id } });
       if (!folder) return res.status(404).json({ message: "Folder not found" });
+      if (folder.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       const nextName = name !== undefined ? assertValidName(name) : folder.name;
       const nextParentId = parent_id !== undefined ? parent_id : folder.parent_id;
@@ -193,6 +206,7 @@ export class DriveController {
       const { id } = req.params;
       const folder = await prisma.driveFolder.findUnique({ where: { id } });
       if (!folder) return res.status(404).json({ message: "Folder not found" });
+      if (folder.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       // Collect every physical file under the subtree — including every version's binary —
       // before the cascade wipes the rows.
@@ -268,6 +282,8 @@ export class DriveController {
       const brand_id = req.body.brand_id || folderBrandId || (await pkgdBrandId());
       const url = `/uploads/${file.filename}`;
       const full_path = computeFilePath(folderPath, file.originalname);
+      // Jerarquía ante el agente: RECTOR (siempre en contexto de su marca) o NORMAL (default).
+      const doc_tier = req.body.doc_tier === "RECTOR" ? "RECTOR" : "NORMAL";
 
       const created = await prisma.driveFile.create({
         data: {
@@ -278,6 +294,7 @@ export class DriveController {
           folder_id,
           brand_id,
           full_path,
+          doc_tier,
         },
       });
 
@@ -357,6 +374,7 @@ export class DriveController {
 
       const existing = await prisma.driveFile.findUnique({ where: { id } });
       if (!existing) return res.status(404).json({ message: "File not found" });
+      if (existing.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       const nextName = name !== undefined ? assertValidName(name) : existing.name;
       const nextFolderId = folder_id !== undefined ? folder_id : existing.folder_id;
@@ -399,6 +417,7 @@ export class DriveController {
       const { id } = req.params;
       const file = await prisma.driveFile.findUnique({ where: { id } });
       if (!file) return res.status(404).json({ message: "File not found" });
+      if (file.source === "DROPBOX") return res.status(409).json(DROPBOX_READONLY);
 
       // Collect the binaries of the whole history before the cascade drops the rows.
       const versions = await prisma.driveFileVersion.findMany({
@@ -427,6 +446,85 @@ export class DriveController {
     } catch (error) {
       console.error("Get file error:", error);
       return res.status(500).json({ message: "Failed to fetch file" });
+    }
+  }
+
+  // PATCH /drive/files/:id/tier  { doc_tier: "RECTOR" | "NORMAL" }
+  // Cambiar la jerarquía es metadato NUESTRO: se permite también en archivos DROPBOX
+  // (no muta nada en Dropbox, no desincroniza el espejo).
+  static async setTier(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id } = req.params;
+      const tier = req.body?.doc_tier;
+      if (tier !== "RECTOR" && tier !== "NORMAL") {
+        return res.status(400).json({ message: 'doc_tier debe ser "RECTOR" o "NORMAL"' });
+      }
+      const existing = await prisma.driveFile.findUnique({ where: { id }, select: { id: true } });
+      if (!existing) return res.status(404).json({ message: "File not found" });
+      const updated = await prisma.driveFile.update({ where: { id }, data: { doc_tier: tier } });
+      return res.status(200).json({ id: updated.id, doc_tier: updated.doc_tier });
+    } catch (error: any) {
+      console.error("Set tier error:", error);
+      return res.status(500).json({ message: "Failed to set document tier" });
+    }
+  }
+
+  // GET /drive/rectores/:brand_id  (requireAuthOrN8N)
+  // Documentos RECTORES de la marca: van SIEMPRE al contexto del agente (no dependen de la
+  // búsqueda vectorial). Reconstruye el texto de cada rector concatenando sus chunks de la
+  // versión vigente. ACOTADO por presupuesto de caracteres para no re-inflar el prompt.
+  static async rectores(req: Request, res: Response) {
+    try {
+      const { brand_id } = req.params;
+      const CHAR_BUDGET = 60_000; // ~15k tokens tope duro para el conjunto de rectores
+
+      const files = await prisma.driveFile.findMany({
+        where: { brand_id, doc_tier: "RECTOR" },
+        select: { id: true, name: true, full_path: true, url: true, current_version_id: true },
+        orderBy: { name: "asc" },
+      });
+
+      const docs: Array<{ id: string; name: string; full_path: string; url: string; content: string; truncated: boolean }> = [];
+      let used = 0;
+      let budgetHit = false;
+      for (const f of files) {
+        if (used >= CHAR_BUDGET) {
+          budgetHit = true;
+          break;
+        }
+        // Texto = chunks de la versión vigente, en orden de creación.
+        const chunks = await prisma.fileVectorChunk.findMany({
+          where: {
+            file_id: f.id,
+            OR: [{ version_id: null }, { version_id: f.current_version_id }],
+          },
+          select: { content: true },
+          orderBy: { created_at: "asc" },
+        });
+        let content = chunks.map((c) => c.content).join("\n").trim();
+        let truncated = false;
+        const remaining = CHAR_BUDGET - used;
+        if (content.length > remaining) {
+          content = content.slice(0, remaining);
+          truncated = true;
+          budgetHit = true;
+        }
+        used += content.length;
+        docs.push({ id: f.id, name: f.name, full_path: f.full_path, url: f.url, content, truncated });
+      }
+
+      return res.status(200).json({
+        brand_id,
+        count: docs.length,
+        total_rectores: files.length,
+        char_budget: CHAR_BUDGET,
+        chars_used: used,
+        budget_hit: budgetHit,
+        docs,
+      });
+    } catch (error) {
+      console.error("Rectores error:", error);
+      return res.status(500).json({ message: "Failed to load rector documents" });
     }
   }
 
@@ -461,6 +559,12 @@ export class DriveController {
     try {
       if (!upload) return res.status(400).json({ message: "No file was uploaded" });
       const { id } = req.params;
+
+      const target = await prisma.driveFile.findUnique({ where: { id }, select: { source: true } });
+      if (target?.source === "DROPBOX") {
+        unlinkVersionFile(`/uploads/${upload.filename}`);
+        return res.status(409).json(DROPBOX_READONLY);
+      }
 
       const version = await addVersion(id, upload, {
         note: (req.body?.note as string) ?? null,
@@ -549,10 +653,24 @@ export class DriveController {
         return res.status(415).json({ message: "No HTML preview for this file type" });
       }
 
-      const html = await renderPreviewHtml(source.url, source.name);
+      // Archivos de Dropbox: el binario no vive en /uploads. Se descarga de forma efímera
+      // (no se persiste) y se convierte a HTML por Tika desde memoria.
+      let html: string;
+      if (file.source === "DROPBOX") {
+        if (!file.dropbox_id) return res.status(404).json({ message: "Dropbox file id missing" });
+        const { buffer } = await dropboxDownload(file.dropbox_id);
+        html = await renderPreviewHtmlFromBuffer(buffer, source.name);
+      } else {
+        html = await renderPreviewHtml(source.url, source.name);
+      }
       DriveController.rememberPreview(source.key, html);
       return res.status(200).json({ id, version_id: versionId, html, cached: false });
     } catch (error: any) {
+      if (error instanceof DropboxError) {
+        return res.status(error.status || 502).json({
+          message: "No se pudo obtener la vista previa desde Dropbox en este momento.",
+        });
+      }
       if (error instanceof PreviewError) {
         console.error(`[Drive] preview failed for ${req.params.id}:`, error.message);
         return res.status(error.status).json({ message: error.message });
@@ -603,27 +721,58 @@ export class DriveController {
 
   // GET /drive/tree — WHOLE unified tree (the Drive is one shared space; folders carry an
   // optional related brand). Used by the UI.
-  static async treeAll(_req: Request, res: Response) {
-    return DriveController.buildTree(res, undefined);
+  // Query opcional (usada por la herramienta del agente para NO volcar todo el Drive):
+  //   ?files=false   → solo el esqueleto de carpetas (omite los archivos)
+  //   ?depth=N       → limita la profundidad de carpetas (N niveles desde la raíz)
+  //   ?path=/pref/   → solo el subárbol bajo esa ruta (para "bajar" a una carpeta)
+  static async treeAll(req: Request, res: Response) {
+    return DriveController.buildTree(res, undefined, DriveController.parseTreeOpts(req));
   }
 
   // GET /drive/tree/:brand_id — tree filtered by related brand (used by the n8n agent tool).
   static async tree(req: Request, res: Response) {
-    return DriveController.buildTree(res, req.params.brand_id);
+    return DriveController.buildTree(res, req.params.brand_id, DriveController.parseTreeOpts(req));
+  }
+
+  private static parseTreeOpts(req: Request): { includeFiles: boolean; depth: number | null; path: string | null } {
+    // El agente (token n8n) no debe recibir el Drive entero: por defecto le damos SOLO el
+    // esqueleto de carpetas hasta 3 niveles (~50KB en vez de ~2.4MB), lo que evita reventar
+    // el context window del modelo. La UI (JWT de operador) sigue recibiendo el árbol completo.
+    // Cualquier parámetro explícito (?files=/?depth=/?path=) tiene prioridad para ambos.
+    const isAgent = req.headers["x-n8n-token"] === env.N8N_SECRET_TOKEN;
+    const hasFiles = req.query.files !== undefined;
+    const hasDepth = req.query.depth !== undefined;
+
+    const includeFiles = hasFiles ? req.query.files !== "false" : !isAgent;
+    const depthRaw = parseInt((req.query.depth as string) || "", 10);
+    const depth = Number.isFinite(depthRaw) && depthRaw > 0 ? depthRaw : isAgent && !hasDepth ? 3 : null;
+    const path = typeof req.query.path === "string" && req.query.path ? req.query.path : null;
+    return { includeFiles, depth, path };
   }
 
   // Shared builder. `brandFilter` undefined => everything; otherwise scoped to that related brand.
-  private static async buildTree(res: Response, brandFilter: string | undefined) {
+  // `opts` acota el resultado (ver parseTreeOpts). Defaults = árbol completo (comportamiento previo).
+  private static async buildTree(
+    res: Response,
+    brandFilter: string | undefined,
+    opts: { includeFiles: boolean; depth: number | null; path: string | null } = {
+      includeFiles: true,
+      depth: null,
+      path: null,
+    }
+  ) {
     try {
-      const where = brandFilter ? { brand_id: brandFilter } : {};
+      const where: any = brandFilter ? { brand_id: brandFilter } : {};
+      if (opts.path) where.full_path = { startsWith: opts.path };
 
-      const [folders, files, brands] = await Promise.all([
+      const [foldersRaw, filesRaw, brands] = await Promise.all([
         prisma.driveFolder.findMany({
           where,
-          select: { id: true, name: true, parent_id: true, full_path: true, brand_id: true },
+          select: { id: true, name: true, parent_id: true, full_path: true, brand_id: true, source: true },
           orderBy: { full_path: "asc" },
         }),
-        prisma.driveFile.findMany({
+        opts.includeFiles
+          ? prisma.driveFile.findMany({
           where,
           select: {
             id: true,
@@ -636,12 +785,26 @@ export class DriveController {
             // The UI badges files that carry history and opens the preview on the current version.
             version_count: true,
             current_version_id: true,
+            // LOCAL vs DROPBOX: the UI hides the version manager and shows a "Dropbox" badge.
+            source: true,
+            // RECTOR vs NORMAL: the UI shows a "Rector" badge and the tier toggle.
+            doc_tier: true,
           },
           orderBy: { name: "asc" },
-        }),
+            })
+          : Promise.resolve([] as any[]),
         prisma.brand.findMany({ select: { id: true, name: true } }),
       ]);
       const brandName = new Map(brands.map((b) => [b.id, b.name]));
+
+      // Acotar por profundidad: conserva carpetas hasta `depth` niveles; los archivos solo
+      // si su carpeta sobrevivió (o son de raíz). Esto evita volcar todo el Drive al agente.
+      const depthOf = (fp: string) => fp.split("/").filter(Boolean).length;
+      const folders = opts.depth ? foldersRaw.filter((f) => depthOf(f.full_path) <= opts.depth!) : foldersRaw;
+      const keptFolderIds = new Set(folders.map((f) => f.id));
+      const files = opts.depth
+        ? filesRaw.filter((f: any) => !f.folder_id || keptFolderIds.has(f.folder_id))
+        : filesRaw;
 
       type FileNode = {
         id: string;
@@ -654,6 +817,8 @@ export class DriveController {
         brand_name: string | null;
         version_count: number;
         current_version_id: string | null;
+        source: string;
+        doc_tier: string;
       };
       type Node = {
         id: string;
@@ -662,6 +827,7 @@ export class DriveController {
         full_path: string;
         brand_id: string | null;
         brand_name: string | null;
+        source: string;
         folders: Node[];
         files: FileNode[];
       };
@@ -676,6 +842,7 @@ export class DriveController {
           full_path: f.full_path,
           brand_id: f.brand_id,
           brand_name: f.brand_id ? brandName.get(f.brand_id) ?? null : null,
+          source: f.source,
           folders: [],
           files: [],
         });
@@ -698,6 +865,8 @@ export class DriveController {
           brand_name: file.brand_id ? brandName.get(file.brand_id) ?? null : null,
           version_count: file.version_count,
           current_version_id: file.current_version_id,
+          source: file.source,
+          doc_tier: file.doc_tier,
         };
         if (file.folder_id && byId.has(file.folder_id)) byId.get(file.folder_id)!.files.push(entry);
         else rootFiles.push(entry);

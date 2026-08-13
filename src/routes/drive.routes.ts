@@ -33,6 +33,8 @@ router.post("/upload", requireAuth, uploadMiddleware.single("file"), DriveContro
 router.patch("/files/:id", requireAuth, DriveController.updateFile);
 router.delete("/files/:id", requireAuth, DriveController.deleteFile);
 router.get("/files/:id", requireAuth, DriveController.getFile);
+// Cambiar jerarquía Rector/Normal (metadato del agente). Permitido también en archivos DROPBOX.
+router.patch("/files/:id/tier", requireAuth, DriveController.setTier);
 // Sanitized HTML preview for office formats (docx/xlsx/pptx/odt/rtf/…) via Tika.
 // ?version=<version_id> previews a point in the history instead of the current version.
 router.get("/files/:id/preview", requireAuth, DriveController.previewFile);
@@ -56,6 +58,9 @@ router.get("/tree", requireAuthOrN8N, DriveController.treeAll);
 // GET /drive/tree/:brand_id — brand-filtered tree consumed by the n8n agent tool (Explorar_Archivos).
 // Dual auth: Bearer JWT (operator) or x-n8n-token (agent service).
 router.get("/tree/:brand_id", requireAuthOrN8N, DriveController.tree);
+// GET /drive/rectores/:brand_id — documentos RECTORES de la marca (siempre al contexto del agente).
+// Dual auth: operador (UI, para revisarlos) o token n8n (el flujo los inyecta en cada turno).
+router.get("/rectores/:brand_id", requireAuthOrN8N, DriveController.rectores);
 // Agent write ops (create folder / move file) — additive only, no delete.
 router.post("/agent/manage", requireN8N, DriveController.agentManage);
 router.post("/callback", requireN8N, DriveController.callback);

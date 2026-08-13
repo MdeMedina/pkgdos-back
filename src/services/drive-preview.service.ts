@@ -119,6 +119,15 @@ export async function renderPreviewHtml(storedUrl: string, name: string): Promis
   }
 
   const buffer = await fs.promises.readFile(filePath);
+  return renderPreviewHtmlFromBuffer(buffer, name);
+}
+
+/**
+ * Igual que renderPreviewHtml pero desde bytes en memoria — usado por los archivos de
+ * Dropbox, cuyo binario no vive en /uploads: se descarga de forma efímera y se convierte
+ * sin persistirlo en nuestros servidores.
+ */
+export async function renderPreviewHtmlFromBuffer(buffer: Buffer, name: string): Promise<string> {
   let res: Response;
   try {
     res = await fetch(`${env.TIKA_URL}/tika`, {

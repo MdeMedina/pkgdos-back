@@ -241,6 +241,13 @@ model DriveFolder {
   parent_id  String?  @db.Uuid
   full_path  String // materialized path, p.ej. "/Marketing/2026/"
   brand_id   String?  @db.Uuid
+  // Origen del nodo. LOCAL = subido por un operador (gestión de versiones interna).
+  // DROPBOX = espejo en vivo de una carpeta de Dropbox (solo lectura; su verdad vive allá).
+  source             DriveSource @default(LOCAL)
+  // Identidad de Dropbox para hacer upsert idempotente en cada webhook. path_lower es la
+  // clave estable de Dropbox (case-insensitive); id es el id de la carpeta ("id:...").
+  dropbox_id         String? @unique
+  dropbox_path_lower String? @unique
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt
 
@@ -268,6 +275,17 @@ model DriveFile {
   // Puntero a la versión vigente. Avanzar/retroceder = mover este puntero (no destructivo).
   current_version_id String?  @db.Uuid
   version_count      Int      @default(1)
+  // Origen del archivo. LOCAL = binario en /uploads con historial de versiones interno.
+  // DROPBOX = el binario vive SOLO en Dropbox; `url` apunta a nuestro redirect 302 (enlace
+  // invisible) y el gestor de versiones interno queda deshabilitado (se usa el de Dropbox).
+  source               DriveSource @default(LOCAL)
+  // Jerarquía ante el agente. RECTOR = siempre en contexto cuando se habla de su marca.
+  // NORMAL (default) = solo aparece si la búsqueda vectorial lo trae ante una petición.
+  doc_tier             DocTier @default(NORMAL)
+  dropbox_id           String? @unique // id estable del archivo en Dropbox ("id:...")
+  dropbox_path_lower   String? // ruta case-insensitive, para borrados por path del webhook
+  dropbox_rev          String? // rev actual; si cambia => reingestar vectores
+  dropbox_content_hash String? // content_hash de Dropbox (detección de cambio de contenido)
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
@@ -316,6 +334,34 @@ model FileVectorChunk {
   version DriveFileVersion? @relation(fields: [version_id], references: [id], onDelete: Cascade)
 
   @@map("file_vector_chunks")
+}
+
+// Estado de la sincronización con Dropbox. Una sola fila (id = "singleton"): guarda el
+// cursor de list_folder para pedir SOLO los cambios (delta) en cada webhook, sin re-listar todo.
+model DropboxSyncState {
+  id             String    @id @default("singleton")
+  cursor         String? // cursor de /files/list_folder/continue
+  root_path      String // carpeta espejada, p.ej. "/EXTERNAL DOWNLOADS"
+  account_id     String? // cuenta que autorizó (para saber qué webhook nos corresponde)
+  last_synced_at DateTime?
+  last_error     String? // último fallo de sync (para el mensaje amigable / diagnóstico)
+  updated_at     DateTime  @updatedAt
+
+  @@map("dropbox_sync_state")
+}
+
+// Origen de un nodo del Drive: subido localmente vs espejo en vivo de Dropbox.
+enum DriveSource {
+  LOCAL
+  DROPBOX
+}
+
+// Jerarquía de un documento del Drive ante el agente.
+// RECTOR: rige la marca, se inyecta SIEMPRE que se habla de ella.
+// NORMAL: se activa solo cuando la búsqueda vectorial lo recupera.
+enum DocTier {
+  RECTOR
+  NORMAL
 }
 
 enum GlobalRole {

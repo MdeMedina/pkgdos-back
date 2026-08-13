@@ -17,7 +17,16 @@ app.use(
   })
 );
 
-app.use(express.json());
+// Capturamos el cuerpo crudo (rawBody) al parsear JSON: el webhook de Dropbox se firma con
+// HMAC-SHA256 sobre los bytes exactos del body, así que necesitamos verificar contra el
+// original, no contra el JSON re-serializado. Es un no-op para el resto de rutas.
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 // Serve uploads folder static files (for document downloads)

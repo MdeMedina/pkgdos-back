@@ -18,5 +18,18 @@ export const env = {
   // publicado en loopback por su compose. PKGD OS lo consume vía /api/pulse/*.
   PULSE_API_URL: process.env.PULSE_API_URL || "http://127.0.0.1:4000",
   PULSE_API_KEY: process.env.PULSE_API_KEY || "",
+  // ── Dropbox (espejo en vivo del Drive) ──────────────────────────────────────
+  // App Scoped de solo lectura (files.metadata.read + files.content.read). El refresh
+  // token es permanente; el access token se renueva solo. El APP_SECRET además firma
+  // (HMAC-SHA256) los webhooks entrantes, así que sirve de secreto de verificación.
+  DROPBOX_APP_KEY: process.env.DROPBOX_APP_KEY || "",
+  DROPBOX_APP_SECRET: process.env.DROPBOX_APP_SECRET || "",
+  DROPBOX_REFRESH_TOKEN: process.env.DROPBOX_REFRESH_TOKEN || "",
+  // Carpeta espejada (ruta API, ya enraizada en el team space): "/EXTERNAL DOWNLOADS".
+  DROPBOX_ROOT_PATH: process.env.DROPBOX_ROOT_PATH || "/EXTERNAL DOWNLOADS",
 };
+
+/** ¿Está configurada la integración de Dropbox? (evita arrancar sync sin credenciales) */
+export const dropboxEnabled = () =>
+  Boolean(env.DROPBOX_APP_KEY && env.DROPBOX_APP_SECRET && env.DROPBOX_REFRESH_TOKEN);
 
