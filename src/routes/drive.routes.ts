@@ -61,6 +61,8 @@ router.get("/tree/:brand_id", requireAuthOrN8N, DriveController.tree);
 // GET /drive/rectores/:brand_id — documentos RECTORES de la marca (siempre al contexto del agente).
 // Dual auth: operador (UI, para revisarlos) o token n8n (el flujo los inyecta en cada turno).
 router.get("/rectores/:brand_id", requireAuthOrN8N, DriveController.rectores);
+// GET /drive/globales — documentos GLOBALES/institucionales (Charter, PKGD guide): siempre, sin marca.
+router.get("/globales", requireAuthOrN8N, DriveController.globales);
 // Agent write ops (create folder / move file) — additive only, no delete.
 router.post("/agent/manage", requireN8N, DriveController.agentManage);
 router.post("/callback", requireN8N, DriveController.callback);

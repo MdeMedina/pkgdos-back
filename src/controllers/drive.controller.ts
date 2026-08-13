@@ -283,7 +283,8 @@ export class DriveController {
       const url = `/uploads/${file.filename}`;
       const full_path = computeFilePath(folderPath, file.originalname);
       // Jerarquía ante el agente: RECTOR (siempre en contexto de su marca) o NORMAL (default).
-      const doc_tier = req.body.doc_tier === "RECTOR" ? "RECTOR" : "NORMAL";
+      const doc_tier =
+        req.body.doc_tier === "GLOBAL" ? "GLOBAL" : req.body.doc_tier === "RECTOR" ? "RECTOR" : "NORMAL";
 
       const created = await prisma.driveFile.create({
         data: {
@@ -449,15 +450,15 @@ export class DriveController {
     }
   }
 
-  // PATCH /drive/files/:id/tier  { doc_tier: "RECTOR" | "NORMAL" }
+  // PATCH /drive/files/:id/tier  { doc_tier: "GLOBAL" | "RECTOR" | "NORMAL" }
   // Cambiar la jerarquía es metadato NUESTRO: se permite también en archivos DROPBOX
   // (no muta nada en Dropbox, no desincroniza el espejo).
   static async setTier(req: AuthenticatedRequest, res: Response) {
     try {
       const { id } = req.params;
       const tier = req.body?.doc_tier;
-      if (tier !== "RECTOR" && tier !== "NORMAL") {
-        return res.status(400).json({ message: 'doc_tier debe ser "RECTOR" o "NORMAL"' });
+      if (tier !== "GLOBAL" && tier !== "RECTOR" && tier !== "NORMAL") {
+        return res.status(400).json({ message: 'doc_tier debe ser "GLOBAL", "RECTOR" o "NORMAL"' });
       }
       const existing = await prisma.driveFile.findUnique({ where: { id }, select: { id: true } });
       if (!existing) return res.status(404).json({ message: "File not found" });
@@ -469,62 +470,84 @@ export class DriveController {
     }
   }
 
+  // Reconstruye el texto de los docs de un tier (concatenando chunks de la versión vigente),
+  // acotado por presupuesto de caracteres. Compartido por /rectores y /globales.
+  private static async loadTierDocs(
+    where: { doc_tier: "RECTOR" | "GLOBAL"; brand_id?: string },
+    charBudget: number,
+  ) {
+    const files = await prisma.driveFile.findMany({
+      where,
+      select: { id: true, name: true, full_path: true, url: true, current_version_id: true },
+      orderBy: { name: "asc" },
+    });
+    const docs: Array<{ id: string; name: string; full_path: string; url: string; content: string; truncated: boolean }> = [];
+    let used = 0;
+    let budgetHit = false;
+    for (const f of files) {
+      if (used >= charBudget) {
+        budgetHit = true;
+        break;
+      }
+      const chunks = await prisma.fileVectorChunk.findMany({
+        where: { file_id: f.id, OR: [{ version_id: null }, { version_id: f.current_version_id }] },
+        select: { content: true },
+        orderBy: { created_at: "asc" },
+      });
+      let content = chunks.map((c) => c.content).join("\n").trim();
+      let truncated = false;
+      const remaining = charBudget - used;
+      if (content.length > remaining) {
+        content = content.slice(0, remaining);
+        truncated = true;
+        budgetHit = true;
+      }
+      used += content.length;
+      docs.push({ id: f.id, name: f.name, full_path: f.full_path, url: f.url, content, truncated });
+    }
+    return { docs, used, budgetHit, total: files.length };
+  }
+
   // GET /drive/rectores/:brand_id  (requireAuthOrN8N)
-  // Documentos RECTORES de la marca: van SIEMPRE al contexto del agente (no dependen de la
-  // búsqueda vectorial). Reconstruye el texto de cada rector concatenando sus chunks de la
-  // versión vigente. ACOTADO por presupuesto de caracteres para no re-inflar el prompt.
+  // Documentos RECTORES de la marca: van SIEMPRE al contexto del agente cuando se habla de ella.
   static async rectores(req: Request, res: Response) {
     try {
       const { brand_id } = req.params;
-      const CHAR_BUDGET = 60_000; // ~15k tokens tope duro para el conjunto de rectores
-
-      const files = await prisma.driveFile.findMany({
-        where: { brand_id, doc_tier: "RECTOR" },
-        select: { id: true, name: true, full_path: true, url: true, current_version_id: true },
-        orderBy: { name: "asc" },
-      });
-
-      const docs: Array<{ id: string; name: string; full_path: string; url: string; content: string; truncated: boolean }> = [];
-      let used = 0;
-      let budgetHit = false;
-      for (const f of files) {
-        if (used >= CHAR_BUDGET) {
-          budgetHit = true;
-          break;
-        }
-        // Texto = chunks de la versión vigente, en orden de creación.
-        const chunks = await prisma.fileVectorChunk.findMany({
-          where: {
-            file_id: f.id,
-            OR: [{ version_id: null }, { version_id: f.current_version_id }],
-          },
-          select: { content: true },
-          orderBy: { created_at: "asc" },
-        });
-        let content = chunks.map((c) => c.content).join("\n").trim();
-        let truncated = false;
-        const remaining = CHAR_BUDGET - used;
-        if (content.length > remaining) {
-          content = content.slice(0, remaining);
-          truncated = true;
-          budgetHit = true;
-        }
-        used += content.length;
-        docs.push({ id: f.id, name: f.name, full_path: f.full_path, url: f.url, content, truncated });
-      }
-
+      const CHAR_BUDGET = 60_000;
+      const r = await DriveController.loadTierDocs({ doc_tier: "RECTOR", brand_id }, CHAR_BUDGET);
       return res.status(200).json({
         brand_id,
-        count: docs.length,
-        total_rectores: files.length,
+        count: r.docs.length,
+        total_rectores: r.total,
         char_budget: CHAR_BUDGET,
-        chars_used: used,
-        budget_hit: budgetHit,
-        docs,
+        chars_used: r.used,
+        budget_hit: r.budgetHit,
+        docs: r.docs,
       });
     } catch (error) {
       console.error("Rectores error:", error);
       return res.status(500).json({ message: "Failed to load rector documents" });
+    }
+  }
+
+  // GET /drive/globales  (requireAuthOrN8N)
+  // Documentos GLOBALES/institucionales (Charter, PKGD Brand Spirit Guide): van SIEMPRE al
+  // contexto del agente en TODA sesión, sin gate de marca. Nivel más alto de la cadena.
+  static async globales(_req: Request, res: Response) {
+    try {
+      const CHAR_BUDGET = 60_000;
+      const r = await DriveController.loadTierDocs({ doc_tier: "GLOBAL" }, CHAR_BUDGET);
+      return res.status(200).json({
+        count: r.docs.length,
+        total_globales: r.total,
+        char_budget: CHAR_BUDGET,
+        chars_used: r.used,
+        budget_hit: r.budgetHit,
+        docs: r.docs,
+      });
+    } catch (error) {
+      console.error("Globales error:", error);
+      return res.status(500).json({ message: "Failed to load global documents" });
     }
   }
 

@@ -356,10 +356,13 @@ enum DriveSource {
   DROPBOX
 }
 
-// Jerarquía de un documento del Drive ante el agente.
-// RECTOR: rige la marca, se inyecta SIEMPRE que se habla de ella.
-// NORMAL: se activa solo cuando la búsqueda vectorial lo recupera.
+// Jerarquía de un documento del Drive ante el agente (cadena de herencia del Protocol).
+// GLOBAL: institucional (Charter, PKGD Brand Spirit Guide). Se inyecta SIEMPRE, en TODA sesión,
+//         sin importar la marca. Es el nivel más alto de la cadena.
+// RECTOR: rige UNA marca. Se inyecta siempre que se habla de esa marca (Brand Spirit Guide).
+// NORMAL (default): se activa solo cuando la búsqueda vectorial lo recupera (SKU, docs sueltos).
 enum DocTier {
+  GLOBAL
   RECTOR
   NORMAL
 }
