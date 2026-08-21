@@ -201,6 +201,8 @@ model Department {
   users            User[]
   roles            DepartmentRole[]
   knowledge_assets KnowledgeAsset[]
+  // Carpetas del Drive ancladas a este departamento (visibilidad).
+  drive_folder_links DriveFolderDepartment[]
 
   @@map("departments")
 }
@@ -255,10 +257,30 @@ model DriveFolder {
   children DriveFolder[] @relation("FolderTree")
   brand    Brand?        @relation(fields: [brand_id], references: [id], onDelete: Cascade)
   files    DriveFile[]
+  // Anclaje a departamentos (visibilidad). Sin filas => visible para todos.
+  department_links DriveFolderDepartment[]
 
   @@index([brand_id, parent_id])
   @@index([full_path])
   @@map("drive_folders")
+}
+
+/// Anclaje many-to-many carpeta ⇆ departamento. Reflejo del aditivo
+/// `drive_folder_departments_additive.sql` (NO migrar; el SQL crudo lo aplica el
+/// orquestador con psql). Semántica: una carpeta sin filas es visible para todos;
+/// con N filas, solo para usuarios de esos departamentos (o admin). La restricción
+/// cascadea al subárbol. Los archivos heredan la visibilidad de su carpeta.
+model DriveFolderDepartment {
+  folder_id     String   @db.Uuid
+  department_id String   @db.Uuid
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  folder     DriveFolder @relation(fields: [folder_id], references: [id], onDelete: Cascade)
+  department Department  @relation(fields: [department_id], references: [id], onDelete: Cascade)
+
+  @@id([folder_id, department_id])
+  @@index([department_id])
+  @@map("drive_folder_departments")
 }
 
 model DriveFile {

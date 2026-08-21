@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "../config/database.js";
 import { env } from "../config/env.js";
-import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
+import {
+  AuthenticatedRequest,
+  DepartmentContext,
+  resolveDepartmentContext,
+} from "../middlewares/auth.middleware.js";
 import {
   assertValidName,
   computeFolderPath,
@@ -62,6 +66,63 @@ const DROPBOX_READONLY = {
 };
 
 export class DriveController {
+  // ── Department visibility (folder anchoring) ────────────
+  // A folder anchored to N departments (rows in drive_folder_departments) is visible
+  // only to users of those departments (or admins). A folder with NO rows is visible to
+  // everyone (backward compat). The restriction CASCADES to the subtree: if an ancestor is
+  // hidden, its whole subtree is hidden. Files inherit their folder's visibility.
+  //
+  // Implemented with raw SQL (like rebrandSubtree) so it is robust against the known
+  // schema.prisma <-> prod DB drift: it never depends on a regenerated Prisma client.
+
+  /** Load the folder→departments anchoring once. Returns the per-folder set (for UI badges/
+   *  prefill) and the list of RESTRICTED folder paths + their allowed departments (for the
+   *  cascade filter). Joined against drive_folders so full_path is authoritative. */
+  private static async loadFolderDepartments(): Promise<{
+    deptByFolder: Map<string, string[]>;
+    restricted: Array<{ full_path: string; depts: Set<string> }>;
+  }> {
+    const rows = await prisma.$queryRaw<
+      Array<{ folder_id: string; full_path: string; department_id: string }>
+    >`
+      SELECT dfd.folder_id, f.full_path, dfd.department_id
+      FROM drive_folder_departments dfd
+      JOIN drive_folders f ON f.id = dfd.folder_id
+    `;
+    const deptByFolder = new Map<string, string[]>();
+    const pathDepts = new Map<string, Set<string>>();
+    for (const r of rows) {
+      const arr = deptByFolder.get(r.folder_id);
+      if (arr) arr.push(r.department_id);
+      else deptByFolder.set(r.folder_id, [r.department_id]);
+
+      const s = pathDepts.get(r.full_path);
+      if (s) s.add(r.department_id);
+      else pathDepts.set(r.full_path, new Set([r.department_id]));
+    }
+    const restricted = Array.from(pathDepts, ([full_path, depts]) => ({ full_path, depts }));
+    return { deptByFolder, restricted };
+  }
+
+  /** full_paths of folders the caller may NOT see. A folder is denied when it is restricted
+   *  and the caller's department is not in its allow-set (or the caller has no department).
+   *  Admins and an unresolved context (agent w/o user_id) see everything → []. */
+  private static deniedPrefixes(
+    restricted: Array<{ full_path: string; depts: Set<string> }>,
+    ctx: DepartmentContext | null,
+  ): string[] {
+    if (!ctx || ctx.isAdmin) return [];
+    return restricted
+      .filter((r) => !(ctx.departmentId && r.depts.has(ctx.departmentId)))
+      .map((r) => r.full_path);
+  }
+
+  /** True when `fullPath` lives under any denied folder (itself included). Since folder
+   *  full_paths always end with "/", startsWith is a safe subtree test. */
+  private static isHiddenPath(fullPath: string, denied: string[]): boolean {
+    return denied.some((dp) => fullPath.startsWith(dp));
+  }
+
   // ── Folders ─────────────────────────────────────────────
 
   // POST /drive/folders  { name, parent_id?, brand_id? }
@@ -237,6 +298,22 @@ export class DriveController {
       const { brand_id } = req.params;
       const parentId = (req.query.parent_id as string) || null;
 
+      // Department visibility gate (see loadFolderDepartments / deniedPrefixes).
+      const deptCtx = await resolveDepartmentContext(req);
+      const { deptByFolder, restricted } = await DriveController.loadFolderDepartments();
+      const denied = DriveController.deniedPrefixes(restricted, deptCtx);
+
+      // Navigating INTO a folder: the parent (and thus its ancestors) must be visible.
+      if (parentId && denied.length) {
+        const parent = await prisma.driveFolder.findUnique({
+          where: { id: parentId },
+          select: { full_path: true },
+        });
+        if (parent && DriveController.isHiddenPath(parent.full_path, denied)) {
+          return res.status(403).json({ message: "No tienes acceso a esta carpeta" });
+        }
+      }
+
       const [folders, files] = await Promise.all([
         prisma.driveFolder.findMany({
           where: { brand_id, parent_id: parentId },
@@ -248,10 +325,72 @@ export class DriveController {
         }),
       ]);
 
-      return res.status(200).json({ folders, files });
+      // Hide sibling folders the user may not see, and expose each folder's anchoring so the
+      // admin UI can prefill its multiselect. Files inherit the (already-verified) parent's
+      // visibility, so they pass through untouched.
+      const visibleFolders = denied.length
+        ? folders.filter((f) => !DriveController.isHiddenPath(f.full_path, denied))
+        : folders;
+      const foldersOut = visibleFolders.map((f) => ({
+        ...f,
+        department_ids: deptByFolder.get(f.id) ?? [],
+      }));
+
+      return res.status(200).json({ folders: foldersOut, files });
     } catch (error) {
       console.error("List contents error:", error);
       return res.status(500).json({ message: "Failed to list folder contents" });
+    }
+  }
+
+  // PUT /drive/folders/:id/departments  { department_ids: string[] }  (requireAuth + admin)
+  // REEMPLAZA el conjunto de departamentos a los que está anclada la carpeta (visibilidad).
+  //   []            → sin anclaje: visible para TODOS (compat hacia atrás).
+  //   [d1, d2, ...] → visible solo para usuarios de esos departamentos (o admin), y la
+  //                   restricción cascadea al subárbol.
+  // Se implementa con SQL crudo (robusto ante el drift schema.prisma <-> BD de prod).
+  static async setFolderDepartments(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { id } = req.params;
+      const body = req.body as { department_ids?: unknown };
+      const ids = Array.isArray(body.department_ids) ? body.department_ids : null;
+      if (!ids || !ids.every((x) => typeof x === "string")) {
+        return res.status(400).json({ message: "department_ids debe ser un arreglo de UUIDs" });
+      }
+      const unique = Array.from(new Set(ids as string[]));
+
+      const folder = await prisma.driveFolder.findUnique({ where: { id }, select: { id: true } });
+      if (!folder) return res.status(404).json({ message: "Folder not found" });
+
+      // Reject unknown department ids up front (a bad FK would otherwise blow up as a 500).
+      if (unique.length) {
+        const found = await prisma.department.findMany({
+          where: { id: { in: unique } },
+          select: { id: true },
+        });
+        if (found.length !== unique.length) {
+          return res.status(400).json({ message: "Uno o más departamentos no existen" });
+        }
+      }
+
+      // Replace the full set atomically: wipe then re-insert.
+      await prisma.$transaction([
+        prisma.$executeRaw`DELETE FROM drive_folder_departments WHERE folder_id = ${id}::uuid`,
+        ...unique.map(
+          (depId) => prisma.$executeRaw`
+            INSERT INTO drive_folder_departments (folder_id, department_id)
+            VALUES (${id}::uuid, ${depId}::uuid)
+            ON CONFLICT DO NOTHING
+          `,
+        ),
+      ]);
+
+      return res.status(200).json({ folder_id: id, department_ids: unique });
+    } catch (error: any) {
+      console.error("Set folder departments error:", error);
+      return res
+        .status(error.status || 500)
+        .json({ message: error.message || "Failed to set folder departments" });
     }
   }
 
@@ -749,12 +888,19 @@ export class DriveController {
   //   ?depth=N       → limita la profundidad de carpetas (N niveles desde la raíz)
   //   ?path=/pref/   → solo el subárbol bajo esa ruta (para "bajar" a una carpeta)
   static async treeAll(req: Request, res: Response) {
-    return DriveController.buildTree(res, undefined, DriveController.parseTreeOpts(req));
+    const deptCtx = await resolveDepartmentContext(req);
+    return DriveController.buildTree(res, undefined, DriveController.parseTreeOpts(req), deptCtx);
   }
 
   // GET /drive/tree/:brand_id — tree filtered by related brand (used by the n8n agent tool).
   static async tree(req: Request, res: Response) {
-    return DriveController.buildTree(res, req.params.brand_id, DriveController.parseTreeOpts(req));
+    const deptCtx = await resolveDepartmentContext(req);
+    return DriveController.buildTree(
+      res,
+      req.params.brand_id,
+      DriveController.parseTreeOpts(req),
+      deptCtx,
+    );
   }
 
   private static parseTreeOpts(req: Request): { includeFiles: boolean; depth: number | null; path: string | null } {
@@ -782,13 +928,14 @@ export class DriveController {
       includeFiles: true,
       depth: null,
       path: null,
-    }
+    },
+    deptCtx: DepartmentContext | null = null,
   ) {
     try {
       const where: any = brandFilter ? { brand_id: brandFilter } : {};
       if (opts.path) where.full_path = { startsWith: opts.path };
 
-      const [foldersRaw, filesRaw, brands] = await Promise.all([
+      const [foldersRawAll, filesRawAll, brands, folderDepts] = await Promise.all([
         prisma.driveFolder.findMany({
           where,
           select: { id: true, name: true, parent_id: true, full_path: true, brand_id: true, source: true },
@@ -817,8 +964,20 @@ export class DriveController {
             })
           : Promise.resolve([] as any[]),
         prisma.brand.findMany({ select: { id: true, name: true } }),
+        DriveController.loadFolderDepartments(),
       ]);
       const brandName = new Map(brands.map((b) => [b.id, b.name]));
+      const { deptByFolder, restricted } = folderDepts;
+
+      // Department visibility gate: drop folders the caller may not see, and their whole
+      // subtree (files included). Admins / unresolved context (agent w/o user_id) => no denial.
+      const denied = DriveController.deniedPrefixes(restricted, deptCtx);
+      const foldersRaw = denied.length
+        ? foldersRawAll.filter((f) => !DriveController.isHiddenPath(f.full_path, denied))
+        : foldersRawAll;
+      const filesRaw = denied.length
+        ? filesRawAll.filter((f: any) => !DriveController.isHiddenPath(f.full_path, denied))
+        : filesRawAll;
 
       // Acotar por profundidad: conserva carpetas hasta `depth` niveles; los archivos solo
       // si su carpeta sobrevivió (o son de raíz). Esto evita volcar todo el Drive al agente.
@@ -851,6 +1010,8 @@ export class DriveController {
         brand_id: string | null;
         brand_name: string | null;
         source: string;
+        // Departamentos a los que está anclada (visibilidad). [] = visible para todos.
+        department_ids: string[];
         folders: Node[];
         files: FileNode[];
       };
@@ -866,6 +1027,7 @@ export class DriveController {
           brand_id: f.brand_id,
           brand_name: f.brand_id ? brandName.get(f.brand_id) ?? null : null,
           source: f.source,
+          department_ids: deptByFolder.get(f.id) ?? [],
           folders: [],
           files: [],
         });

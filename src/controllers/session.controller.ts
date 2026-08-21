@@ -35,6 +35,17 @@ export class SessionController {
         return res.status(400).json({ message: "Session title is required" });
       }
 
+      // A client-supplied brand_id is not authoritative: the user may only open a
+      // session against a brand they belong to (admins bypass). Reject otherwise.
+      if (brand_id) {
+        const isMember =
+          req.user.global_role === "admin" ||
+          req.user.brands.some((b) => b.brand_id === brand_id);
+        if (!isMember) {
+          return res.status(403).json({ message: "You are not a member of this brand" });
+        }
+      }
+
       const initialTranscript = prompt ? [
         {
           id: `msg_user_${Math.random().toString(36).substring(2, 10)}`,

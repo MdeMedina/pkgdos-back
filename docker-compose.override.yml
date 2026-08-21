@@ -1,0 +1,8 @@
+# Persistencia de archivos subidos (uploads) — NO versionado.
+# Sin esto, /app/uploads vive en la capa efímera del contenedor y se
+# pierde en cada reinicio/deploy (rompe GET /api/knowledge/:id/download).
+# docker compose mergea este override automáticamente con docker-compose.yml.
+services:
+  backend:
+    volumes:
+      - ./uploads:/app/uploads

@@ -312,7 +312,8 @@ export class KnowledgeController {
         if (!r.ok) {
           const txt = await r.text();
           console.error(`n8n approve webhook failed (${r.status}): ${txt}`);
-          return res.status(502).json({ message: "Approval workflow failed", detail: txt });
+          // Do not echo the upstream body/detail to the client — log it, respond generic.
+          return res.status(502).json({ message: "Approval workflow failed" });
         }
         n8nResult = await r.json().catch(() => null);
       } catch (e) {
@@ -415,7 +416,8 @@ export class KnowledgeController {
         if (!r.ok) {
           const txt = await r.text();
           console.error(`n8n approve webhook failed (${r.status}): ${txt}`);
-          return res.status(502).json({ message: "Approval workflow failed", detail: txt });
+          // Do not echo the upstream body/detail to the client — log it, respond generic.
+          return res.status(502).json({ message: "Approval workflow failed" });
         }
         n8nResult = await r.json().catch(() => null);
       } catch (e) {
@@ -456,7 +458,8 @@ export class KnowledgeController {
         if (!r.ok) {
           const txt = await r.text();
           console.error(`n8n approve webhook failed (${r.status}): ${txt}`);
-          return res.status(502).json({ message: "Approval workflow failed", detail: txt });
+          // Do not echo the upstream body/detail to the client — log it, respond generic.
+          return res.status(502).json({ message: "Approval workflow failed" });
         }
         n8nResult = await r.json().catch(() => null);
       } catch (e) {
@@ -472,12 +475,25 @@ export class KnowledgeController {
   }
 
   // Stream physical document file download
-  static async download(req: Request, res: Response) {
+  static async download(req: AuthenticatedRequest, res: Response) {
     try {
       const { id } = req.params;
       const asset = await prisma.knowledgeAsset.findUnique({ where: { id } });
       if (!asset) {
         return res.status(404).json({ message: "Knowledge asset not found" });
+      }
+
+      // Brand gate: an operator may only download an asset of a brand they belong
+      // to (admins bypass; unbranded assets are not gated). The transcript payload
+      // below is sensitive, so this must run before anything is streamed.
+      const user = req.user;
+      const isMember =
+        !asset.brand_id ||
+        (user
+          ? user.global_role === "admin" || user.brands.some((b) => b.brand_id === asset.brand_id)
+          : false);
+      if (!isMember) {
+        return res.status(403).json({ message: "You are not a member of this asset's brand" });
       }
 
       // If it is an extracted gold asset, stream the JSON transcript as text

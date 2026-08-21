@@ -2,7 +2,12 @@ import { Router } from "express";
 import multer from "multer";
 import fs from "node:fs";
 import { KnowledgeController } from "../controllers/knowledge.controller.js";
-import { requireAuth, requireAdmin, requireN8N } from "../middlewares/auth.middleware.js";
+import {
+  requireAuth,
+  requireAdmin,
+  requireN8N,
+  requireBrandMembership,
+} from "../middlewares/auth.middleware.js";
 import { env } from "../config/env.js";
 
 const router = Router();
@@ -34,8 +39,15 @@ router.post("/session/:session_id/approve", requireAuth, requireAdmin, Knowledge
 router.post("/session/:session_id/approve-jewel", requireAuth, requireAdmin, KnowledgeController.approveSessionJewel);
 // Pending proposals for admin review — MUST be before "/:brand_id" so it is not swallowed by it.
 router.get("/proposals", requireAuth, requireAdmin, KnowledgeController.listProposals);
-router.get("/:brand_id", requireAuth, KnowledgeController.listByBrand);
+router.get(
+  "/:brand_id",
+  requireAuth,
+  requireBrandMembership((req) => req.params.brand_id),
+  KnowledgeController.listByBrand,
+);
 router.get("/department/:department_id", requireAuth, KnowledgeController.listByDepartment);
+// download validates the asset's brand membership inside the controller (it also
+// handles the Gold/session-transcript case that has no source file).
 router.get("/:id/download", requireAuth, KnowledgeController.download);
 router.patch("/:id/status", requireN8N, KnowledgeController.statusWebhook);
 // Admin approves a proposal -> triggers the n8n approval flow.
@@ -44,7 +56,7 @@ router.post("/:id/approve", requireAuth, requireAdmin, KnowledgeController.appro
 router.post("/:id/generate-doc", requireN8N, KnowledgeController.generateDoc);
 // n8n files a fresh proposal's .docx into /Branding/<marca>/Propuesta/.
 router.post("/:id/file-proposal", requireN8N, KnowledgeController.fileProposal);
-router.post("/callback", KnowledgeController.callback);
+router.post("/callback", requireN8N, KnowledgeController.callback);
 router.delete("/:id", requireAuth, requireAdmin, KnowledgeController.delete);
 router.patch("/:id/brand", requireAuth, requireAdmin, KnowledgeController.updateBrand);
 
