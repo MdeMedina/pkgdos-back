@@ -20,10 +20,30 @@ model User {
   calcification_level Float            @default(0.0)
   department_id       String?          @db.Uuid
   department_role_id  String?          @db.Uuid
+  // Líder de departamento: puede mover/borrar archivos y carpetas ancladas a SU
+  // departamento (y su subárbol), excepto /EXTERNAL DOWNLOADS (solo admins). Varios
+  // líderes por departamento. No confiere permisos administrativos globales.
+  is_department_leader Boolean         @default(false)
+  // Tour de onboarding: false hasta que el operador termina (o salta) el recorrido guiado.
+  onboarding_completed Boolean         @default(false)
+  // Laboratorio: can_view_labs = permiso por-usuario para ver secciones marcadas como
+  // página de laboratorio. is_lab_owner = dueño del laboratorio (solo test@pkgd.os);
+  // gatea el toggle en Hive y el organizador de secciones-lab. Solo se siembra por SQL.
+  can_view_labs        Boolean         @default(false)
+  is_lab_owner         Boolean         @default(false)
+  can_view_pulse       Boolean         @default(false)
+  /// Herramientas de partners (Sales y Ads, embebidas). Permiso por usuario,
+  /// no lista fija: los partners que entren se activan desde Hive.
+  can_view_partner_tools Boolean       @default(false)
+  can_view_sales         Boolean       @default(false)
+  can_view_ads           Boolean       @default(false)
+  photo_url            String?
   created_at          DateTime         @default(now())
   updated_at          DateTime         @default(now()) @updatedAt
   sessions            Session[]
   brands              UserBrand[]
+  departments         UserDepartment[]
+  role_assignments    UserRoleAssignment[]
   diagnostics         UserDiagnostic[]
   profile             UserProfile?
   knowledge_assets    KnowledgeAsset[]
@@ -81,6 +101,9 @@ model CompanyDiagnostic {
   mood_label   String?
   mood_score   Float?
   payload      Json     @default("{}")
+  summary_en    String?
+  mood_label_en String?
+  payload_en    Json?
   created_at   DateTime @default(now()) @db.Timestamptz(6)
 
   @@index([created_at(sort: Desc)])
@@ -111,6 +134,25 @@ model UserBrand {
 
   @@id([user_id, brand_id])
   @@map("user_brands")
+}
+
+/// Departamentos de un usuario. `users.department_id` sigue siendo el PRINCIPAL
+/// (clasifica propuestas nuevas y ordena la bandeja); aquí viven todos, incluido
+/// el principal, con la jefatura por departamento.
+model UserDepartment {
+  user_id       String     @db.Uuid
+  department_id String     @db.Uuid
+  is_leader     Boolean    @default(false)
+  /// Rol dentro de ESTE departamento (también en los secundarios).
+  department_role_id String?  @db.Uuid
+  created_at    DateTime   @default(now()) @db.Timestamptz(6)
+  user          User       @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  department    Department @relation(fields: [department_id], references: [id], onDelete: Cascade)
+  department_role DepartmentRole? @relation(fields: [department_role_id], references: [id], onDelete: SetNull)
+
+  @@id([user_id, department_id])
+  @@index([department_id, is_leader])
+  @@map("user_departments")
 }
 
 model Session {
@@ -203,8 +245,28 @@ model Department {
   knowledge_assets KnowledgeAsset[]
   // Carpetas del Drive ancladas a este departamento (visibilidad).
   drive_folder_links DriveFolderDepartment[]
+  /// Área de Spotlight espejo de este departamento.
+  spotlight_area   SpotlightArea?
 
   @@map("departments")
+  user_departments UserDepartment[]
+}
+
+/// Roles de una persona según el Mapa de Roles (oct-26): primario (vertical base),
+/// secundario (asignación formal en otra área) o dinámico (intervención a demanda
+/// vía ClickUp). Varios por departamento. El primario principal sigue también en
+/// users.department_role_id. Los dinámicos NO dan membresía (user_departments).
+model UserRoleAssignment {
+  user_id            String         @db.Uuid
+  department_role_id String         @db.Uuid
+  kind               String
+  created_at         DateTime       @default(now()) @db.Timestamptz(6)
+  user               User           @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  department_role    DepartmentRole @relation(fields: [department_role_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, department_role_id])
+  @@index([department_role_id])
+  @@map("user_role_assignments")
 }
 
 model DepartmentRole {
@@ -213,6 +275,8 @@ model DepartmentRole {
   department_id    String           @db.Uuid
   department       Department       @relation(fields: [department_id], references: [id], onDelete: Cascade)
   users            User[]
+  user_departments UserDepartment[]
+  role_assignments UserRoleAssignment[]
   knowledge_assets KnowledgeAsset[]
   created_at       DateTime         @default(now())
   updated_at       DateTime         @default(now()) @updatedAt
@@ -308,6 +372,13 @@ model DriveFile {
   dropbox_path_lower   String? // ruta case-insensitive, para borrados por path del webhook
   dropbox_rev          String? // rev actual; si cambia => reingestar vectores
   dropbox_content_hash String? // content_hash de Dropbox (detección de cambio de contenido)
+  // Google Doc de origen (sincronización programada Google Drive → RAG). Link estable
+  // Google↔PKGD: al re-editarse en Google, se sube una versión nueva a ESTE mismo archivo.
+  gdoc_id              String? @unique
+  gdoc_modified_time   String? // modifiedTime (RFC3339) de la última versión sincronizada; evita re-ingestar sin cambios
+  // Si este archivo es un .zip: subcarpeta donde se extrajo su contenido. Al subir una versión
+  // nueva del zip se arrasa esa subcarpeta y se re-extrae (solo cuenta la versión actual).
+  zip_expanded_folder_id String? @db.Uuid
   created_at DateTime @default(now())
   updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
@@ -372,6 +443,16 @@ model DropboxSyncState {
   @@map("dropbox_sync_state")
 }
 
+// Ajustes globales de la app (singleton, id="singleton"). lab_sections = lista de
+// claves de sección (los `to` del nav) marcadas como "página de laboratorio".
+model AppSettings {
+  id           String   @id @default("singleton")
+  lab_sections Json     @default("[\"/spotlight\"]")
+  updated_at   DateTime @updatedAt
+
+  @@map("app_settings")
+}
+
 // Origen de un nodo del Drive: subido localmente vs espejo en vivo de Dropbox.
 enum DriveSource {
   LOCAL
@@ -432,4 +513,262 @@ enum VectorizationStatus {
   Pending
   Embedded
   Error
+}
+
+// ==================== PKGD Spotlight ====================
+model SpotlightArea {
+  id               String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name             String                @unique
+  director_user_id String?               @db.Uuid
+  sort_order       Int                   @default(0)
+  created_at       DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  /// Departamento del que es espejo. Se emparejan por este vínculo y NO por
+  /// nombre: "Unidad de Diseño" y "Diseño Gráfico" son el mismo equipo con dos
+  /// nombres, y un match por texto habría creado un área duplicada.
+  /// SetNull a propósito: borrar el departamento NO borra el área, que conserva
+  /// nominaciones, boletas y ganadores históricos.
+  department_id    String?               @unique @db.Uuid
+  department       Department?           @relation(fields: [department_id], references: [id], onDelete: SetNull)
+  nominations      SpotlightNomination[]
+
+  @@map("spotlight_areas")
+}
+
+model SpotlightCycle {
+  id                            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  year                          Int
+  month                         Int
+  label                         String                @default("")
+  status                        String                @default("nominating")
+  nominations_close_at          DateTime?             @db.Timestamptz(6)
+  voting_close_at               DateTime?             @db.Timestamptz(6)
+  winner_nomination_id          String?               @db.Uuid
+  special_mention_nomination_id String?               @db.Uuid
+  is_tie                        Boolean               @default(false)
+  // Se enciende al cerrar el ciclo. Los ciclos cerrados ANTES de la ruleta
+  // quedan en false a propósito: la mecánica aplica solo de aquí en adelante.
+  roulette_enabled              Boolean               @default(false)
+  /// Ronda de desempate en curso: solo estas nominaciones reciben votos. Vacío = votación normal.
+  runoff_nomination_ids         String[]              @default([]) @db.Uuid
+  /// Registro de cada ronda empatada (votos por nominación, empatadas, boletas, fecha).
+  tie_history                   Json                  @default("[]")
+  created_at                    DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at                    DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  nominations                   SpotlightNomination[]
+  prize_spins                   SpotlightPrizeSpin[]
+
+  @@unique([year, month])
+  @@map("spotlight_cycles")
+}
+
+model SpotlightNomination {
+  id                  String                           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cycle_id            String                           @db.Uuid
+  area_id             String?                          @db.Uuid
+  title               String
+  description         String?
+  youtube_url         String?
+  external_links      Json                             @default("[]")
+  created_by_user_id  String?                          @db.Uuid
+  vote_count          Int                              @default(0)
+  director_vote_count Int                              @default(0)
+  award_vote_count    Int                              @default(0)
+  is_historical       Boolean                          @default(false)
+  // Archivada: la nominación se conserva completa pero sale del feed y de los
+  // Awards. Se usa para arrastres de un ciclo que ya se votó en otro lado.
+  archived            Boolean                          @default(false)
+  is_month_winner     Boolean                          @default(false)
+  is_special_mention  Boolean                          @default(false)
+  /// Jefe del proyecto = la primera persona nominada. Es quien gira la ruleta si
+  /// el proyecto gana. NULL = nominación anterior a la regla: gira cualquier
+  /// participante (comportamiento viejo, para no afectar ciclos ya en curso).
+  lead_user_id        String?                          @db.Uuid
+  // Segundos del video. La captura el reproductor de YouTube (getDuration) la
+  // primera vez que alguien lo abre: sin API key ni cuota. NULL = nadie lo ha visto.
+  video_duration_seconds Int?
+  created_at          DateTime                         @default(now()) @db.Timestamptz(6)
+  cycle               SpotlightCycle                   @relation(fields: [cycle_id], references: [id], onDelete: Cascade)
+  area                SpotlightArea?                   @relation(fields: [area_id], references: [id], onDelete: SetNull)
+  images              SpotlightNominationImage[]
+  participants        SpotlightNominationParticipant[]
+  comments            SpotlightComment[]
+  prize_spins         SpotlightPrizeSpin[]
+
+  @@index([cycle_id])
+  @@index([area_id])
+  @@map("spotlight_nominations")
+}
+
+model SpotlightNominationParticipant {
+  nomination_id String              @db.Uuid
+  user_id       String              @db.Uuid
+  nomination    SpotlightNomination @relation(fields: [nomination_id], references: [id], onDelete: Cascade)
+
+  @@id([nomination_id, user_id])
+  @@map("spotlight_nomination_participants")
+}
+
+model SpotlightNominationImage {
+  id            String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nomination_id String              @db.Uuid
+  url           String
+  sort_order    Int                 @default(0)
+  nomination    SpotlightNomination @relation(fields: [nomination_id], references: [id], onDelete: Cascade)
+
+  @@index([nomination_id])
+  @@map("spotlight_nomination_images")
+}
+
+model SpotlightReview {
+  cycle_id      String    @db.Uuid
+  user_id       String    @db.Uuid
+  nomination_id String    @db.Uuid
+  reviewed      Boolean   @default(false)
+  video_percent Int       @default(0)
+  clicked_links Json      @default(dbgenerated("'[]'::jsonb"))
+  reviewed_at   DateTime? @db.Timestamptz(6)
+
+  @@id([user_id, nomination_id])
+  @@index([cycle_id, user_id])
+  @@map("spotlight_reviews")
+}
+
+model SpotlightBallot {
+  cycle_id String   @db.Uuid
+  user_id  String   @db.Uuid
+  kind     String   @default("popular")
+  voted_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([cycle_id, user_id, kind])
+  @@map("spotlight_ballots")
+}
+
+model SpotlightAwardCycle {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  year            Int       @unique
+  status          String    @default("voting")
+  voting_close_at DateTime? @db.Timestamptz(6)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@map("spotlight_award_cycles")
+}
+
+/// Sabe QUIÉN votó y en qué área, nunca por quién. Es lo que impide el doble
+/// voto. NUNCA se cruza con SpotlightAwardChoice: ver la nota en ese modelo.
+model SpotlightAwardBallot {
+  award_cycle_id String    @db.Uuid
+  user_id        String    @db.Uuid
+  area_id        String    @db.Uuid
+  voted_at       DateTime  @default(now()) @db.Timestamptz(6)
+  /// "Enviar mis votos": el voto cuenta desde que se emite, esto solo marca que
+  /// la persona dio por cerrada su boleta.
+  submitted_at   DateTime? @db.Timestamptz(6)
+
+  @@id([award_cycle_id, user_id, area_id])
+  @@map("spotlight_award_ballots")
+}
+
+model SpotlightAwardWinner {
+  award_cycle_id String    @db.Uuid
+  area_id        String    @db.Uuid
+  nomination_id  String?   @db.Uuid
+  /// Revelado por área, para destaparlos uno a uno en la junta de fin de año.
+  revealed_at    DateTime? @db.Timestamptz(6)
+  /// 'votos' | 'desempate' | 'direccion'. Un empate resuelto por dirección no
+  /// debe leerse como si el conteo hubiera dicho algo que no dijo.
+  decided_by     String?
+  /// Ronda de desempate acotada a esta área: mientras esté abierta, el área
+  /// acepta votos aunque el ciclo anual ya esté cerrado.
+  runoff_open    Boolean   @default(false)
+
+  @@id([award_cycle_id, area_id])
+  @@map("spotlight_award_winners")
+}
+
+/// La ELECCIÓN del votante, separada de la boleta.
+///
+/// REGLA DE NEGOCIO (no tocar): este modelo NUNCA se cruza con
+/// SpotlightAwardBallot. Aquel sabe QUIÉN votó; éste sabe QUÉ se votó, para
+/// poder cambiarlo hasta el cierre. Unirlos destruye el anonimato.
+///
+/// voter_token = HMAC-SHA256(SPOTLIGHT_VOTE_SECRET, user_id + ':' + award_cycle_id),
+/// derivado en cada petición. La correspondencia persona→token no se guarda.
+model SpotlightAwardChoice {
+  award_cycle_id String   @db.Uuid
+  voter_token    String
+  area_id        String   @db.Uuid
+  nomination_id  String   @db.Uuid
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@id([award_cycle_id, voter_token, area_id])
+  @@index([award_cycle_id, nomination_id], map: "spotlight_award_choices_nom_idx")
+  @@map("spotlight_award_choices")
+}
+
+model Notification {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String   @db.Uuid
+  type       String   @default("info")
+  title      String
+  body       String?
+  link       String?
+  // Objeto que originó el aviso (p. ej. el comentario). Sirve para retirarlo si
+  // ese objeto se borra, en vez de dejar una notificación que no lleva a nada.
+  ref_id     String?  @db.Uuid
+  read       Boolean  @default(false)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([user_id, read, created_at])
+  @@index([ref_id])
+  @@map("notifications")
+}
+
+
+/// Catálogo de premios de la ruleta. Editable sin deploy.
+model SpotlightPrize {
+  id         String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  label      String
+  sort_order Int                  @default(0)
+  active     Boolean              @default(true)
+  created_at DateTime             @default(now()) @db.Timestamptz(6)
+  spins      SpotlightPrizeSpin[]
+
+  @@map("spotlight_prizes")
+}
+
+/// Un giro ya resuelto. El premio lo sortea el SERVIDOR, nunca el navegador.
+/// `prize_label` queda congelado: editar el catálogo no reescribe el historial.
+model SpotlightPrizeSpin {
+  id            String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cycle_id      String              @db.Uuid
+  nomination_id String              @db.Uuid
+  user_id       String              @db.Uuid
+  prize_id      String?             @db.Uuid
+  prize_label   String
+  spin_index    Int
+  created_at    DateTime            @default(now()) @db.Timestamptz(6)
+  cycle         SpotlightCycle      @relation(fields: [cycle_id], references: [id], onDelete: Cascade)
+  nomination    SpotlightNomination @relation(fields: [nomination_id], references: [id], onDelete: Cascade)
+  prize         SpotlightPrize?     @relation(fields: [prize_id], references: [id], onDelete: SetNull)
+
+  @@unique([cycle_id, user_id, spin_index], map: "spotlight_prize_spins_unique")
+  @@index([cycle_id])
+  @@index([user_id])
+  @@map("spotlight_prize_spins")
+}
+
+/// Comentario dentro de una nominación.
+model SpotlightComment {
+  id            String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nomination_id String              @db.Uuid
+  user_id       String              @db.Uuid
+  body          String
+  created_at    DateTime            @default(now()) @db.Timestamptz(6)
+  nomination    SpotlightNomination @relation(fields: [nomination_id], references: [id], onDelete: Cascade)
+
+  @@index([nomination_id, created_at])
+  @@map("spotlight_comments")
 }

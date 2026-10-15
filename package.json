@@ -16,6 +16,7 @@
   "dependencies": {
     "@prisma/client": "^5.14.0",
     "@types/sanitize-html": "^2.16.1",
+    "adm-zip": "^0.5.16",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "docx": "^9.7.1",

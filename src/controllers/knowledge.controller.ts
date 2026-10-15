@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "../config/database.js";
 import { env } from "../config/env.js";
-import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
+import {
+  AuthenticatedRequest,
+  resolveProposalScope,
+  scopeCoversDepartment,
+} from "../middlewares/auth.middleware.js";
 import { AssetType, VectorizationStatus } from "@prisma/client";
 import { placeAssetInBranding } from "../services/drive-asset.service.js";
 import { buildConceptDocx } from "../services/markdown-docx.service.js";
@@ -231,6 +235,22 @@ export class KnowledgeController {
 
       console.log(`[Callback] Asset ${knowledge_asset_id} updated: status=${vectorization_status}, percent=${finalPercent}%`);
 
+      // Reemplazo de SOW por rol: el anterior se borra recién cuando el nuevo quedó
+      // procesado. Si la ingesta del nuevo falla, el viejo sigue sirviendo al agente.
+      if (vectorization_status === "Embedded" && asset.asset_type === "SOP" && asset.department_role_id) {
+        const viejos = await prisma.knowledgeAsset.findMany({
+          where: { department_role_id: asset.department_role_id, asset_type: "SOP", id: { not: asset.id }, created_at: { lt: asset.created_at } },
+        });
+        for (const viejo of viejos) {
+          if (viejo.source_file_url && !viejo.source_file_url.startsWith("/mock/")) {
+            const filePath = path.join(env.UPLOADS_DIR, path.basename(viejo.source_file_url));
+            try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch (err) { console.error(`[Callback] No se pudo borrar ${filePath}:`, err); }
+          }
+          await prisma.knowledgeAsset.delete({ where: { id: viejo.id } });
+          console.log(`[Callback] SOW anterior ${viejo.id} reemplazado por ${asset.id}`);
+        }
+      }
+
       return res.status(200).json(asset);
     } catch (error) {
       console.error("Knowledge status callback error:", error);
@@ -271,16 +291,46 @@ export class KnowledgeController {
   // List PENDING proposals (status='Proposed') for admin review. Optional ?type=Gold|Jewel & ?brand_id=
   static async listProposals(req: AuthenticatedRequest, res: Response) {
     try {
-      const { type, brand_id } = req.query as { type?: string; brand_id?: string };
+      const { type, brand_id, department_id } = req.query as {
+        type?: string; brand_id?: string; department_id?: string;
+      };
+      const scope = await resolveProposalScope(req.user);
+      if (scope.kind === "none") {
+        return res.status(403).json({
+          message: "Solo los administradores o el líder de un área pueden ver propuestas",
+        });
+      }
       const where: any = { status: "Proposed" };
       if (type === "Gold" || type === "Jewel") where.asset_type = type as AssetType;
       if (brand_id) where.brand_id = brand_id;
+      // El alcance MANDA sobre el filtro que venga del cliente: un líder no puede
+      // pedir otra área por query string.
+      if (scope.kind === "departments") {
+        // Puede acotar DENTRO de las áreas que lidera, nunca fuera.
+        where.department_id =
+          department_id && scope.departmentIds.includes(department_id)
+            ? department_id
+            : { in: scope.departmentIds };
+      } else if (department_id) {
+        // Alcance total: puede acotar la vista; "none" = bucket sin área.
+        where.department_id = department_id === "none" ? null : department_id;
+      }
 
       const proposals = await prisma.knowledgeAsset.findMany({
         where,
         include: { brand: true, department: true, department_role: true },
         orderBy: { created_at: "desc" },
       });
+      // PRIORIDAD: primero las del departamento PRINCIPAL de quien pregunta, luego
+      // las de las otras áreas que lidera, y al final el resto. Dentro de cada
+      // grupo se conserva el orden por fecha.
+      const principal = req.user?.department_id ?? null;
+      const suyas = new Set(
+        (req.user?.departments ?? []).filter((d) => d.is_leader).map((d) => d.department_id),
+      );
+      const rango = (p: { department_id: string | null }) =>
+        principal && p.department_id === principal ? 0 : p.department_id && suyas.has(p.department_id) ? 1 : 2;
+      proposals.sort((a, b) => rango(a) - rango(b));
       return res.status(200).json(proposals);
     } catch (error) {
       console.error("List proposals error:", error);
@@ -295,6 +345,10 @@ export class KnowledgeController {
       const existing = await prisma.knowledgeAsset.findUnique({ where: { id } });
       if (!existing) {
         return res.status(404).json({ message: "Knowledge asset not found" });
+      }
+      const scope = await resolveProposalScope(req.user);
+      if (!scopeCoversDepartment(scope, existing.department_id)) {
+        return res.status(403).json({ message: "Esta propuesta pertenece a otra área" });
       }
       if (existing.status !== "Proposed") {
         return res.status(409).json({ message: `Asset is not a pending proposal (status='${existing.status}')` });
@@ -404,6 +458,10 @@ export class KnowledgeController {
       if (!proposal) {
         return res.status(409).json({ message: "No pending Gold proposal for this session" });
       }
+      const scope = await resolveProposalScope(req.user);
+      if (!scopeCoversDepartment(scope, proposal.department_id)) {
+        return res.status(403).json({ message: "Esta propuesta pertenece a otra área" });
+      }
 
       const approveUrl = `${env.N8N_BASE_URL}/webhook/pkgd/approve-asset`;
       let n8nResult: unknown = null;
@@ -445,6 +503,10 @@ export class KnowledgeController {
       });
       if (!proposal) {
         return res.status(409).json({ message: "No pending Jewel proposal for this session" });
+      }
+      const scope = await resolveProposalScope(req.user);
+      if (!scopeCoversDepartment(scope, proposal.department_id)) {
+        return res.status(403).json({ message: "Esta propuesta pertenece a otra área" });
       }
 
       const approveUrl = `${env.N8N_BASE_URL}/webhook/pkgd/approve-asset`;

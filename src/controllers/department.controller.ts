@@ -41,6 +41,11 @@ export class DepartmentController {
         include: { roles: true },
       });
 
+      // Espejo en Spotlight: sin esto el departamento existe pero no se le puede
+      // nominar nada, y el hueco no se nota hasta que alguien lo intenta.
+      // Si ya hay un área con ese nombre sin vincular, se adopta en vez de duplicar.
+      await DepartmentController._espejoSpotlight(dept.id, dept.name);
+
       return res.status(201).json(dept);
     } catch (error) {
       console.error("Create department error:", error);
@@ -69,6 +74,13 @@ export class DepartmentController {
         include: { roles: true },
       });
 
+      // El área espejo lleva el mismo nombre: si no, las dos listas se separan
+      // otra vez y nadie lo nota.
+      await prisma.spotlightArea.updateMany({
+        where: { department_id: id },
+        data: { name: updated.name },
+      });
+
       return res.status(200).json(updated);
     } catch (error) {
       console.error("Update department error:", error);
@@ -85,6 +97,8 @@ export class DepartmentController {
         return res.status(404).json({ message: "Department not found" });
       }
 
+      // El área de Spotlight NO se borra: solo se desvincula (FK ON DELETE SET
+      // NULL). Conserva sus nominaciones, boletas y ganadores históricos.
       await prisma.department.delete({ where: { id } });
       return res.status(200).json({ ok: true, message: "Department deleted successfully" });
     } catch (error) {
@@ -175,4 +189,27 @@ export class DepartmentController {
       return res.status(500).json({ message: "Failed to delete role" });
     }
   }
+  /** Crea el área de Spotlight espejo, o adopta una existente del mismo nombre. */
+  static async _espejoSpotlight(departmentId: string, name: string) {
+    try {
+      const yaVinculada = await prisma.spotlightArea.findFirst({ where: { department_id: departmentId } });
+      if (yaVinculada) return;
+      const porNombre = await prisma.spotlightArea.findFirst({ where: { name } });
+      if (porNombre) {
+        if (!porNombre.department_id) {
+          await prisma.spotlightArea.update({ where: { id: porNombre.id }, data: { department_id: departmentId } });
+        }
+        return;
+      }
+      const ultima = await prisma.spotlightArea.findFirst({ orderBy: { sort_order: "desc" }, select: { sort_order: true } });
+      await prisma.spotlightArea.create({
+        data: { name, department_id: departmentId, sort_order: (ultima?.sort_order ?? 0) + 1 },
+      });
+    } catch (e) {
+      // Un fallo aquí no debe tumbar la creación del departamento: se reporta y
+      // el área se puede crear después desde el panel de Spotlight.
+      console.error("espejoSpotlight", e);
+    }
+  }
+
 }

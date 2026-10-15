@@ -23,6 +23,9 @@ const profileUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
+// El operador cierra su propio tour de onboarding. Antes de "/:id".
+router.post("/me/onboarding-complete", requireAuth, UserController.completeOnboarding);
+
 // El about me del propio operador. Antes de "/:id" para que no lo capture esa ruta.
 router.get("/me/profile", requireAuth, UserProfileController.getMine);
 router.post("/me/profile", requireAuth, profileUpload.single("file"), UserProfileController.uploadMine);
@@ -35,5 +38,7 @@ router.post("/", requireAuth, requireAdmin, UserController.create);
 router.patch("/:id", requireAuth, requireAdmin, UserController.update);
 router.delete("/:id", requireAuth, requireAdmin, UserController.delete);
 router.get("/:id/diagnostic", requireAuth, requireAdmin, UserController.getDiagnostic);
+// Recuperación de contraseña: el admin reenvía al usuario un link para redefinir su clave.
+router.post("/:id/reset-password", requireAuth, requireAdmin, UserController.resetPassword);
 
 export default router;

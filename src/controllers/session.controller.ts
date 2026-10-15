@@ -3,6 +3,40 @@ import { prisma } from "../config/database.js";
 import { env } from "../config/env.js";
 import { AuthenticatedRequest } from "../middlewares/auth.middleware.js";
 
+/**
+ * Tope propio para un turno del Oráculo. Debe quedar POR DEBAJO del corte de
+ * Cloudflare (~100s → 524) para que el error lo produzca el backend, que sí
+ * puede dejar constancia en el transcript. nginx corta a los 180s.
+ */
+const ORACLE_TIMEOUT_MS = Number(process.env.ORACLE_TIMEOUT_MS ?? 90_000);
+
+// Desempaca el JSON que devuelve el agente como texto ({"escalate","payload","vacio"}).
+// 1) JSON válido → tal cual. 2) Caracteres de control sin escapar (saltos de línea
+// literales dentro del texto) → se escapan y se reintenta. 3) Último recurso: se
+// extrae el valor de "payload" con una expresión (tolera ] o } sobrantes que deja el modelo). Si nada funciona, null.
+function _desempacar(raw: string): any | null {
+  try { return JSON.parse(raw); } catch { /* sigue */ }
+  const escapar = (t: string) =>
+    t.replace(/[\u0000-\u001f]/g, (c) => (c === "\n" ? "\\n" : c === "\r" ? "\\r" : c === "\t" ? "\\t" : ""));
+  try { return JSON.parse(escapar(raw.trim())); } catch { /* sigue */ }
+  // El modelo a veces olvida cerrar la última llave/corchete/comilla: se completan y se reintenta.
+  const cerrar = (t: string) => {
+    const pila: string[] = []; let inS = false, esc = false;
+    for (const ch of t) {
+      if (inS) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inS = false; continue; }
+      if (ch === '"') inS = true;
+      else if (ch === "{") pila.push("}"); else if (ch === "[") pila.push("]");
+      else if (ch === "}" || ch === "]") pila.pop();
+    }
+    return t.replace(/[\s,]+$/, "") + (inS ? '"' : "") + pila.reverse().join("");
+  };
+  try { return JSON.parse(cerrar(escapar(raw.trim()))); } catch { /* sigue */ }
+  const m = raw.match(/"payload"\s*:\s*"([\s\S]*)"\s*[\]}]*\s*(?:,\s*"(?:escalate|vacio|success)"\s*:\s*(?:true|false|null)\s*)*\}\s*$/);
+  if (m) {
+    try { return { payload: JSON.parse('"' + escapar(m[1]) + '"') }; } catch { /* sigue */ }
+  }
+  return null;
+}
 
 export class SessionController {
   // Get active operator's sessions
@@ -282,6 +316,24 @@ export class SessionController {
         return res.status(400).json({ message: "Dialectic session is closed" });
       }
 
+      // El transcript es del backend (n8n nunca lo toca), asi que este snapshot
+      // sigue siendo valido despues de la llamada.
+      const currentTranscript = Array.isArray(session.transcript_payload)
+        ? (session.transcript_payload as any[])
+        : [];
+      const userMsg = {
+        id: `msg_user_${Math.random().toString(36).substring(2, 10)}`,
+        role: "user" as const,
+        text: prompt,
+        ts: new Date().toISOString(),
+      };
+      // Se persiste ANTES de llamar a n8n: si el turno revienta (rate limit, tope de
+      // iteraciones, timeout), la persona no pierde lo que escribio.
+      await prisma.session.update({
+        where: { id: session_id },
+        data: { transcript_payload: [...currentTranscript, userMsg], updated_at: new Date() },
+      });
+
       let replyText = "";
       let replyId = `ai_reply_${Math.random().toString(36).substring(2, 10)}`;
       let success: any = false;
@@ -294,8 +346,12 @@ export class SessionController {
       if (env.N8N_BASE_URL) {
         const intakeUrl = `${env.N8N_BASE_URL}/webhook/pkgd/intake`;
         console.log(`Forwarding prompt for session ${session_id} to n8n: ${intakeUrl}`);
+        // Cloudflare corta a los ~100s (524) y nginx a los 180s. Sin tope propio el
+        // turno se queda colgado y la persona nunca recibe un error legible; con este
+        // tope el backend siempre responde antes de que lo corten por fuera.
         const response = await fetch(intakeUrl, {
           method: "POST",
+          signal: AbortSignal.timeout(ORACLE_TIMEOUT_MS),
           headers: {
             "Content-Type": "application/json",
             "x-n8n-token": env.N8N_SECRET_TOKEN,
@@ -340,17 +396,15 @@ export class SessionController {
             }));
           actions = clean.length ? clean : null;
         }
-        // Pregunta Sencilla envía payload como string JSON con el texto en .payload
+        // Pregunta Sencilla envía payload como string JSON con el texto en .payload.
+        // gpt-5-mini a veces deja saltos de línea SIN escapar dentro del texto: eso
+        // es JSON inválido y antes se mostraba crudo al usuario. _desempacar lo tolera.
         if (typeof payload === "string" && payload.trim().startsWith("{")) {
-          try {
-            const inner = JSON.parse(payload);
-            if (typeof inner?.payload === 'string') {
-              payload = inner.payload;
-            }
-            if (inner?.success !== undefined) {
-              success = inner.success;
-            }
-          } catch { /* dejar payload tal cual */ }
+          const inner = _desempacar(payload);
+          if (inner) {
+            if (typeof inner.payload === "string") payload = inner.payload;
+            if (inner.success !== undefined) success = inner.success;
+          }
         }
 
         replyText = (typeof payload === "string" && payload.trim())
@@ -393,18 +447,8 @@ export class SessionController {
         ...(actions ? { actions } : {}),
       };
 
-      // Append user message and AI response to database transcript
-      const userMsg = {
-        id: `msg_user_${Math.random().toString(36).substring(2, 10)}`,
-        role: "user" as const,
-        text: prompt,
-        ts: new Date().toISOString(),
-      };
-
-      const currentTranscript = Array.isArray(session.transcript_payload)
-        ? (session.transcript_payload as any[])
-        : [];
-
+      // El mensaje del usuario ya se guardo arriba; aqui se reescribe el transcript
+      // completo con la respuesta incluida.
       const usingN8N = !!env.N8N_BASE_URL;
       const shouldClose = isSuccess;
 
@@ -449,7 +493,42 @@ export class SessionController {
       return res.status(200).json(conceptoEntry ? { ...reply, concepto_entry: conceptoEntry } : reply);
     } catch (error) {
       console.error("Send prompt error:", error);
-      return res.status(500).json({ message: "Failed to communicate with Oracle Workspace" });
+      // El mensaje del usuario ya quedo guardado. Se agrega una constancia del fallo
+      // para que la conversacion se lea coherente y no parezca que se ignoro el turno.
+      const esTimeout = (error as any)?.name === "TimeoutError" || (error as any)?.name === "AbortError";
+      try {
+        const { id: session_id } = req.params;
+        const { language } = req.body;
+        const en = esTimeout
+          ? "The Oracle took too long to answer and the turn was cut. Your message was saved — send it again."
+          : "The Oracle could not answer this turn. Your message was saved — send it again.";
+        const es = esTimeout
+          ? "El Oráculo tardó demasiado y el turno se cortó. Tu mensaje quedó guardado: vuelve a enviarlo."
+          : "El Oráculo no pudo responder este turno. Tu mensaje quedó guardado: vuelve a enviarlo.";
+        const fresh = await prisma.session.findUnique({ where: { id: session_id }, select: { transcript_payload: true } });
+        const prev = Array.isArray(fresh?.transcript_payload) ? (fresh!.transcript_payload as any[]) : [];
+        await prisma.session.update({
+          where: { id: session_id },
+          data: {
+            transcript_payload: [...prev, {
+              id: `ai_reply_error_${Math.random().toString(36).substring(2, 10)}`,
+              role: "ai-ceo",
+              text: String(language) === "en" ? en : es,
+              ts: new Date().toISOString(),
+              success: false,
+              error: true,
+            }],
+            updated_at: new Date(),
+          },
+        });
+      } catch (e2) {
+        console.error("No se pudo registrar el fallo en el transcript:", e2);
+      }
+      return res.status(esTimeout ? 504 : 500).json({
+        message: esTimeout
+          ? "The Oracle timed out. Your message was saved."
+          : "Failed to communicate with Oracle Workspace",
+      });
     }
   }
 

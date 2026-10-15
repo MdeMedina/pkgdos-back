@@ -36,3 +36,7 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Respaldos manuales de despliegue (viven en /root/bak-src, no en git)
+*.bak-*
+*.bak

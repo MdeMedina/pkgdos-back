@@ -53,7 +53,18 @@ app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 // required, and an operator may only read a file whose brand they belong to.
 // The n8n token is accepted because the ingest pipeline fetches these URLs
 // (it must send `x-n8n-token` when doing so).
-app.get("/uploads/:filename", requireAuthOrN8N, async (req, res) => {
+app.get(
+  "/uploads/:filename",
+  (req, _res, next) => {
+    // El navegador (<a download>, <img src>) no puede setear el header Authorization.
+    // Permitimos autenticar por ?token= (mismo JWT), copiándolo al header para requireAuth.
+    if (!req.headers.authorization && typeof req.query.token === "string" && req.query.token) {
+      req.headers.authorization = `Bearer ${req.query.token}`;
+    }
+    next();
+  },
+  requireAuthOrN8N,
+  async (req, res) => {
   try {
     const filename = path.basename(req.params.filename); // block path traversal
     const filePath = path.join(env.UPLOADS_DIR, filename);

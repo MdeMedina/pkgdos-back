@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
+import AdmZip from "adm-zip";
 import { prisma } from "../config/database.js";
 import { env } from "../config/env.js";
 import {
@@ -112,8 +113,9 @@ export class DriveController {
     ctx: DepartmentContext | null,
   ): string[] {
     if (!ctx || ctx.isAdmin) return [];
+    // Ve la carpeta si CUALQUIERA de sus departamentos esta en la lista permitida.
     return restricted
-      .filter((r) => !(ctx.departmentId && r.depts.has(ctx.departmentId)))
+      .filter((r) => !ctx.departmentIds.some((id) => r.depts.has(id)))
       .map((r) => r.full_path);
   }
 
@@ -455,6 +457,27 @@ export class DriveController {
         data: { current_version_id: version.id, version_count: 1 },
       });
 
+      // Un .zip NO se vectoriza como blob: queda como contenedor y su contenido se extrae
+      // a una subcarpeta (con su nombre) donde cada documento se ingesta por separado.
+      if (DriveController.isZipFile(file.originalname, file.mimetype)) {
+        const subfolderFullPath = DriveController.zipSubfolderPath(folderPath, file.originalname);
+        try {
+          const { count, folderId } = await DriveController.expandZipInto(req, file.path, {
+            subfolderFullPath,
+            brandId: brand_id,
+            docTier: doc_tier as "GLOBAL" | "RECTOR" | "NORMAL",
+          });
+          const linked = await prisma.driveFile.update({
+            where: { id: withVersion.id },
+            data: { zip_expanded_folder_id: folderId },
+          });
+          return res.status(201).json({ ...linked, expanded_files: count });
+        } catch (zErr) {
+          console.error("[Drive] zip expand failed:", zErr);
+          return res.status(201).json({ ...withVersion, expanded_files: 0, zip_error: true });
+        }
+      }
+
       // Fire-and-forget async ingest notification to n8n (never blocks the upload response).
       DriveController.notifyIngest(req, withVersion, version).catch((e) =>
         console.error("[Drive] ingest webhook dispatch failed:", e)
@@ -466,6 +489,261 @@ export class DriveController {
       if (file) unlinkPhysical(`/uploads/${file.filename}`);
       return res.status(500).json({ message: "Failed to upload file" });
     }
+  }
+
+  // POST /drive/google-sync  (requireN8N, multipart: file=<doc exportado>)  — sincronización
+  // programada Google Drive → RAG. n8n exporta el Google Doc (vía la Service Account) y lo
+  // sube aquí; nosotros lo hacemos un archivo REAL del Drive de PKGD y disparamos la MISMA
+  // ingesta (Tika→trocea→embeddings→file_vector_chunks) que cualquier subida.
+  //   - Vínculo estable por `gdoc_id`: si ya existe, se sube una VERSIÓN nueva (conserva historial
+  //     y re-vectoriza); si no, se crea el archivo.
+  //   - `doc_tier` por defecto RECTOR (siempre en contexto del agente para su marca).
+  // Campos (form-data): gdoc_id (req), name, brand_id, folder_id, doc_tier, gdoc_modified_time.
+  static async googleSync(req: Request, res: Response) {
+    const upload = (req as AuthenticatedRequest).file;
+    try {
+      if (!upload) return res.status(400).json({ message: "No file was uploaded" });
+      const b = (req.body ?? {}) as Record<string, string>;
+      const gdoc_id = String(b.gdoc_id || "").trim();
+      if (!gdoc_id) {
+        unlinkPhysical(`/uploads/${upload.filename}`);
+        return res.status(400).json({ message: "gdoc_id is required" });
+      }
+      const name = String(b.name || upload.originalname);
+      const gdoc_modified_time = b.gdoc_modified_time ? String(b.gdoc_modified_time) : null;
+      const doc_tier =
+        b.doc_tier === "GLOBAL" ? "GLOBAL" : b.doc_tier === "NORMAL" ? "NORMAL" : "RECTOR";
+
+      // Carpeta destino (opcional) → hereda marca; explicit brand_id gana; fallback PKGD.
+      const folder_id = b.folder_id || null;
+      let folderPath: string | null = null;
+      let folderBrandId: string | null = null;
+      if (folder_id) {
+        const folder = await prisma.driveFolder.findUnique({ where: { id: folder_id } });
+        if (folder) {
+          folderPath = folder.full_path;
+          folderBrandId = folder.brand_id;
+        }
+      }
+      const brand_id = b.brand_id || folderBrandId || (await pkgdBrandId());
+
+      const existing = await prisma.driveFile.findFirst({ where: { gdoc_id } });
+
+      if (existing) {
+        // ¿Cambió realmente? Si el modifiedTime coincide, no re-ingestamos (evita trabajo/costo).
+        if (gdoc_modified_time && existing.gdoc_modified_time === gdoc_modified_time) {
+          unlinkPhysical(`/uploads/${upload.filename}`);
+          return res.status(200).json({ file: existing, action: "unchanged" });
+        }
+        await prisma.driveFile.update({
+          where: { id: existing.id },
+          data: { name, doc_tier, brand_id, gdoc_modified_time },
+        });
+        const version = await addVersion(existing.id, upload, {
+          note: "google-sync",
+          uploaded_by: null,
+        });
+        const file = (await prisma.driveFile.findUnique({ where: { id: existing.id } }))!;
+        DriveController.forgetPreview(version.id);
+        DriveController.notifyIngest(req, file, version).catch((e) =>
+          console.error("[Drive] ingest webhook dispatch failed:", e),
+        );
+        return res.status(200).json({ file, version, action: "updated" });
+      }
+
+      // Alta nueva: archivo + versión 1 + ingesta.
+      const url = `/uploads/${upload.filename}`;
+      const full_path = computeFilePath(folderPath, name);
+      const created = await prisma.driveFile.create({
+        data: {
+          name,
+          url,
+          mime_type: upload.mimetype,
+          size: upload.size,
+          folder_id,
+          brand_id,
+          full_path,
+          doc_tier,
+          gdoc_id,
+          gdoc_modified_time,
+        },
+      });
+      const version = await prisma.driveFileVersion.create({
+        data: {
+          file_id: created.id,
+          version: 1,
+          name,
+          url,
+          mime_type: upload.mimetype,
+          size: upload.size,
+          uploaded_by: null,
+        },
+      });
+      const withVersion = await prisma.driveFile.update({
+        where: { id: created.id },
+        data: { current_version_id: version.id, version_count: 1 },
+      });
+      DriveController.notifyIngest(req, withVersion, version).catch((e) =>
+        console.error("[Drive] ingest webhook dispatch failed:", e),
+      );
+      return res.status(201).json({ file: withVersion, version, action: "created" });
+    } catch (error) {
+      console.error("Google sync error:", error);
+      if (upload) unlinkPhysical(`/uploads/${upload.filename}`);
+      return res.status(500).json({ message: "Failed to sync google doc" });
+    }
+  }
+
+  // ── ZIP: expandir el contenido a archivos reales del Drive ───────────────────
+  // Un .zip no se vectoriza como blob: se guarda como contenedor (sin ingesta) y su
+  // contenido se extrae a una SUBCARPETA con el nombre del zip; cada documento es un
+  // archivo del Drive independiente (misma marca/tier) que se ingesta uno a uno.
+  static isZipFile(name: string, mime: string): boolean {
+    const m = (mime || "").toLowerCase();
+    return (
+      m === "application/zip" ||
+      m === "application/x-zip-compressed" ||
+      m === "application/x-zip" ||
+      (name || "").toLowerCase().endsWith(".zip")
+    );
+  }
+
+  // Ruta de la subcarpeta dedicada al contenido del zip (hermana del zip, con su nombre).
+  private static zipSubfolderPath(parentFolderPath: string | null, zipName: string): string {
+    const base = zipName.replace(/\.zip$/i, "").trim() || zipName;
+    const parent = parentFolderPath && parentFolderPath !== "" ? parentFolderPath : "/";
+    return `${parent}${base}/`;
+  }
+
+  private static zipChildMime(name: string): string {
+    const ext = (name.toLowerCase().split(".").pop() || "").trim();
+    const M: Record<string, string> = {
+      pdf: "application/pdf",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      doc: "application/msword",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      xls: "application/vnd.ms-excel",
+      pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      ppt: "application/vnd.ms-powerpoint",
+      txt: "text/plain",
+      md: "text/markdown",
+      csv: "text/csv",
+      rtf: "application/rtf",
+      json: "application/json",
+      html: "text/html",
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      webp: "image/webp",
+      bmp: "image/bmp",
+      tiff: "image/tiff",
+      heic: "image/heic",
+      svg: "image/svg+xml",
+    };
+    return M[ext] || "application/octet-stream";
+  }
+
+  // Basura de zips (macOS / ocultos) que no debe ingestarse.
+  private static zipSkip(entryName: string): boolean {
+    const base = entryName.split("/").pop() || "";
+    return (
+      entryName.startsWith("__MACOSX/") ||
+      base === "" ||
+      base === ".DS_Store" ||
+      base.startsWith("._") ||
+      base.startsWith(".")
+    );
+  }
+
+  // Borra (si existe) la subcarpeta previa del zip y re-extrae el contenido actual.
+  // `wipeFolderId` = subcarpeta anterior a arrasar (nueva versión reemplaza todo). Devuelve
+  // { count, folderId } — folderId = subcarpeta (para guardar el vínculo en el zip).
+  private static async expandZipInto(
+    req: Request,
+    zipLocalPath: string,
+    opts: {
+      subfolderFullPath: string;
+      brandId: string | null;
+      docTier: "GLOBAL" | "RECTOR" | "NORMAL";
+      wipeFolderId?: string | null;
+    },
+  ): Promise<{ count: number; folderId: string | null }> {
+    const { subfolderFullPath, brandId, docTier, wipeFolderId } = opts;
+
+    // 1) Arrasar el contenido anterior (subárbol + chunks + físicos), como deleteFolder.
+    const prev =
+      (wipeFolderId
+        ? await prisma.driveFolder.findUnique({ where: { id: wipeFolderId } })
+        : null) ?? (await prisma.driveFolder.findFirst({ where: { full_path: subfolderFullPath } }));
+    if (prev) {
+      const files = await prisma.driveFile.findMany({
+        where: { full_path: { startsWith: prev.full_path } },
+        select: { id: true, url: true },
+      });
+      const versions = await prisma.driveFileVersion.findMany({
+        where: { file_id: { in: files.map((f) => f.id) } },
+        select: { url: true },
+      });
+      await prisma.driveFolder.delete({ where: { id: prev.id } }); // FK ON DELETE CASCADE
+      files.forEach((f) => unlinkPhysical(f.url));
+      versions.forEach((v) => unlinkVersionFile(v.url));
+    }
+
+    // 2) (Re)crear la subcarpeta vacía.
+    const subfolder = await ensureFolderByPath(subfolderFullPath);
+
+    // 3) Extraer cada entrada como archivo real del Drive + ingesta individual.
+    let count = 0;
+    const zip = new AdmZip(zipLocalPath);
+    for (const e of zip.getEntries()) {
+      if (e.isDirectory || DriveController.zipSkip(e.entryName)) continue;
+      const parts = e.entryName.split("/").filter(Boolean);
+      const base = parts[parts.length - 1];
+      const internalDir = parts.slice(0, -1).join("/");
+      const targetFolder = internalDir
+        ? await ensureFolderByPath(`${subfolder.full_path}${internalDir}/`)
+        : subfolder;
+      const data = e.getData();
+      if (!data || data.length === 0) continue;
+      const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}`;
+      fs.writeFileSync(path.join(env.UPLOADS_DIR, filename), data);
+      const url = `/uploads/${filename}`;
+      const mime = DriveController.zipChildMime(base);
+      const full_path = `${targetFolder.full_path}${base}`;
+      const createdFile = await prisma.driveFile.create({
+        data: {
+          name: base,
+          url,
+          mime_type: mime,
+          size: data.length,
+          folder_id: targetFolder.id,
+          brand_id: brandId,
+          full_path,
+          doc_tier: docTier,
+        },
+      });
+      const version = await prisma.driveFileVersion.create({
+        data: {
+          file_id: createdFile.id,
+          version: 1,
+          name: base,
+          url,
+          mime_type: mime,
+          size: data.length,
+          uploaded_by: (req as AuthenticatedRequest).user?.id ?? null,
+        },
+      });
+      const withVersion = await prisma.driveFile.update({
+        where: { id: createdFile.id },
+        data: { current_version_id: version.id, version_count: 1 },
+      });
+      DriveController.notifyIngest(req, withVersion, version).catch((err) =>
+        console.error("[Drive] zip child ingest dispatch failed:", err),
+      );
+      count++;
+    }
+    return { count, folderId: subfolder.id };
   }
 
   // POST webhook to n8n so it can download → Tika → chunk → embed → insert into file_vector_chunks.
@@ -736,6 +1014,34 @@ export class DriveController {
 
       // A new version means new content: its own vectors, and the old preview is not it.
       DriveController.forgetPreview(version.id);
+
+      // ZIP: no se vectoriza. La versión nueva REEMPLAZA todo — se arrasa la subcarpeta
+      // extraída anterior (por el vínculo zip_expanded_folder_id) y se re-extrae del nuevo zip.
+      if (DriveController.isZipFile(file.name, file.mime_type)) {
+        const parentFolder = file.folder_id
+          ? await prisma.driveFolder.findUnique({
+              where: { id: file.folder_id },
+              select: { full_path: true },
+            })
+          : null;
+        const subfolderFullPath = DriveController.zipSubfolderPath(
+          parentFolder?.full_path ?? "/",
+          file.name,
+        );
+        const newZipPath = path.join(env.UPLOADS_DIR, path.basename(version.url));
+        const { count, folderId } = await DriveController.expandZipInto(req, newZipPath, {
+          subfolderFullPath,
+          brandId: file.brand_id,
+          docTier: (file.doc_tier as "GLOBAL" | "RECTOR" | "NORMAL") ?? "NORMAL",
+          wipeFolderId: (file as any).zip_expanded_folder_id ?? null,
+        });
+        const linked = await prisma.driveFile.update({
+          where: { id: file.id },
+          data: { zip_expanded_folder_id: folderId },
+        });
+        return res.status(201).json({ file: linked, version, expanded_files: count });
+      }
+
       DriveController.notifyIngest(req, file, version).catch((e) =>
         console.error("[Drive] ingest webhook dispatch failed:", e)
       );
@@ -889,7 +1195,13 @@ export class DriveController {
   //   ?path=/pref/   → solo el subárbol bajo esa ruta (para "bajar" a una carpeta)
   static async treeAll(req: Request, res: Response) {
     const deptCtx = await resolveDepartmentContext(req);
-    return DriveController.buildTree(res, undefined, DriveController.parseTreeOpts(req), deptCtx);
+    return DriveController.buildTree(
+      res,
+      undefined,
+      DriveController.parseTreeOpts(req),
+      deptCtx,
+      DriveController.resolveManageContext(req),
+    );
   }
 
   // GET /drive/tree/:brand_id — tree filtered by related brand (used by the n8n agent tool).
@@ -900,7 +1212,25 @@ export class DriveController {
       req.params.brand_id,
       DriveController.parseTreeOpts(req),
       deptCtx,
+      DriveController.resolveManageContext(req),
     );
+  }
+
+  // Who may MOVE/RENAME/DELETE in the Drive UI: admins everywhere, department leaders
+  // inside their department's anchored subtree (except /EXTERNAL DOWNLOADS). Mirrors
+  // requireFolderManager/requireFileManager so the UI only shows controls that will succeed.
+  private static resolveManageContext(
+    req: Request,
+  ): { isAdmin: boolean; isLeader: boolean; leaderDepartmentIds: string[] } | null {
+    const user = (req as AuthenticatedRequest).user;
+    if (!user) return null; // n8n/agent token: no UI management.
+    return {
+      isAdmin: user.global_role === "admin",
+      isLeader: ((user as any).departments ?? []).some((d: any) => d.is_leader),
+      leaderDepartmentIds: ((user as any).departments ?? [])
+        .filter((d: any) => d.is_leader)
+        .map((d: any) => d.department_id),
+    };
   }
 
   private static parseTreeOpts(req: Request): { includeFiles: boolean; depth: number | null; path: string | null } {
@@ -930,6 +1260,7 @@ export class DriveController {
       path: null,
     },
     deptCtx: DepartmentContext | null = null,
+    manageCtx: { isAdmin: boolean; isLeader: boolean; leaderDepartmentIds: string[] } | null = null,
   ) {
     try {
       const where: any = brandFilter ? { brand_id: brandFilter } : {};
@@ -969,6 +1300,23 @@ export class DriveController {
       const brandName = new Map(brands.map((b) => [b.id, b.name]));
       const { deptByFolder, restricted } = folderDepts;
 
+      // ¿Puede el usuario GESTIONAR (mover/renombrar/borrar) esta carpeta? Espeja exactamente
+      // requireFolderManager: admin en todo; líder solo en el subárbol anclado a SU depto;
+      // /EXTERNAL DOWNLOADS solo admin. La UI usa esto para mostrar/ocultar editar y borrar.
+      const canManageFolderPath = (fullPath: string): boolean => {
+        if (!manageCtx) return false;
+        if (manageCtx.isAdmin) return true;
+        if (!manageCtx.isLeader || !manageCtx.leaderDepartmentIds.length) return false;
+        const p = fullPath.startsWith("/") ? fullPath : `/${fullPath}`;
+        if (p === "/EXTERNAL DOWNLOADS" || p.startsWith("/EXTERNAL DOWNLOADS/")) return false;
+        const target = fullPath.endsWith("/") ? fullPath : `${fullPath}/`;
+        return restricted.some((r) => {
+          if (!manageCtx.leaderDepartmentIds.some((id) => r.depts.has(id))) return false;
+          const anchor = r.full_path.endsWith("/") ? r.full_path : `${r.full_path}/`;
+          return target === anchor || target.startsWith(anchor);
+        });
+      };
+
       // Department visibility gate: drop folders the caller may not see, and their whole
       // subtree (files included). Admins / unresolved context (agent w/o user_id) => no denial.
       const denied = DriveController.deniedPrefixes(restricted, deptCtx);
@@ -1001,6 +1349,8 @@ export class DriveController {
         current_version_id: string | null;
         source: string;
         doc_tier: string;
+        // ¿El usuario actual puede mover/borrar este archivo? (admin o líder del depto de su carpeta)
+        can_manage: boolean;
       };
       type Node = {
         id: string;
@@ -1012,6 +1362,8 @@ export class DriveController {
         source: string;
         // Departamentos a los que está anclada (visibilidad). [] = visible para todos.
         department_ids: string[];
+        // ¿El usuario actual puede mover/renombrar/borrar esta carpeta?
+        can_manage: boolean;
         folders: Node[];
         files: FileNode[];
       };
@@ -1028,6 +1380,7 @@ export class DriveController {
           brand_name: f.brand_id ? brandName.get(f.brand_id) ?? null : null,
           source: f.source,
           department_ids: deptByFolder.get(f.id) ?? [],
+          can_manage: canManageFolderPath(f.full_path),
           folders: [],
           files: [],
         });
@@ -1039,6 +1392,9 @@ export class DriveController {
       }
       const rootFiles: FileNode[] = [];
       for (const file of files) {
+        const parentNode = file.folder_id ? byId.get(file.folder_id) : undefined;
+        // Un archivo hereda el permiso de gestión de su carpeta; en la raíz (sin carpeta) solo admin.
+        const fileCanManage = parentNode ? parentNode.can_manage : Boolean(manageCtx?.isAdmin);
         const entry: FileNode = {
           id: file.id,
           name: file.name,
@@ -1052,8 +1408,9 @@ export class DriveController {
           current_version_id: file.current_version_id,
           source: file.source,
           doc_tier: file.doc_tier,
+          can_manage: fileCanManage,
         };
-        if (file.folder_id && byId.has(file.folder_id)) byId.get(file.folder_id)!.files.push(entry);
+        if (parentNode) parentNode.files.push(entry);
         else rootFiles.push(entry);
       }
 

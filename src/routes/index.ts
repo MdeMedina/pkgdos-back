@@ -9,6 +9,9 @@ import companyRoutes from "./company.routes.js";
 import driveRoutes from "./drive.routes.js";
 import dropboxRoutes from "./dropbox.routes.js";
 import pulseRoutes from "./pulse.routes.js";
+import settingsRoutes from "./settings.routes.js";
+import spotlightRoutes from "./spotlight.routes.js";
+import notificationRoutes from "./notification.routes.js";
 
 const apiRouter = Router();
 
@@ -23,5 +26,8 @@ apiRouter.use("/company", companyRoutes);
 apiRouter.use("/drive/dropbox", dropboxRoutes);
 apiRouter.use("/drive", driveRoutes);
 apiRouter.use("/pulse", pulseRoutes);
+apiRouter.use("/settings", settingsRoutes);
+apiRouter.use("/spotlight", spotlightRoutes);
+apiRouter.use("/notifications", notificationRoutes);
 
 export default apiRouter;

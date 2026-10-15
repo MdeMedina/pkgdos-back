@@ -37,6 +37,10 @@ export const env = {
   PORT: parseInt(process.env.PORT || "5000", 10),
   JWT_SECRET: requireSecret("JWT_SECRET", 32),
   N8N_SECRET_TOKEN: requireSecret("N8N_SECRET_TOKEN", 32),
+  // Deriva el token anónimo del votante en los Spotlight Awards.
+  // NO ROTAR mientras existan votos: el token se deriva de este valor, así que
+  // cambiarlo dejaría huérfana cada elección ya emitida.
+  SPOTLIGHT_VOTE_SECRET: requireSecret("SPOTLIGHT_VOTE_SECRET", 32),
   N8N_BASE_URL: process.env.N8N_BASE_URL || "https://n8n.pkgdgroup.com",
   APP_BASE_URL: process.env.APP_BASE_URL || "https://os.pkgdgroup.com",
   DATABASE_URL: requireSecret("DATABASE_URL"),

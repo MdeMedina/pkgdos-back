@@ -33,12 +33,14 @@ const uploadMiddleware = multer({ storage });
 router.get("/", requireAuth, requireAdmin, KnowledgeController.listAll);
 router.post("/upload", requireAuth, requireAdmin, uploadMiddleware.single("file"), KnowledgeController.upload);
 router.get("/external", requireAuth, KnowledgeController.listExternal);
-// Admin approves the Gold proposal of a session (replaces legacy /extract). Must precede "/:brand_id".
-router.post("/session/:session_id/approve", requireAuth, requireAdmin, KnowledgeController.approveBySession);
-// Admin approves the Jewel proposal of a session (in-conversation approve button).
-router.post("/session/:session_id/approve-jewel", requireAuth, requireAdmin, KnowledgeController.approveSessionJewel);
-// Pending proposals for admin review — MUST be before "/:brand_id" so it is not swallowed by it.
-router.get("/proposals", requireAuth, requireAdmin, KnowledgeController.listProposals);
+// DG o el líder del área aprueban el Oro de una sesión (el alcance se valida en el
+// controlador, que ya carga la propuesta). Debe preceder a "/:brand_id".
+router.post("/session/:session_id/approve", requireAuth, KnowledgeController.approveBySession);
+// Ídem para la Joya (botón de aprobar dentro de la conversación).
+router.post("/session/:session_id/approve-jewel", requireAuth, KnowledgeController.approveSessionJewel);
+// Propuestas pendientes, filtradas por área según quién pregunta. DEBE ir antes
+// de "/:brand_id" para que esa ruta no se la trague.
+router.get("/proposals", requireAuth, KnowledgeController.listProposals);
 router.get(
   "/:brand_id",
   requireAuth,
@@ -50,8 +52,8 @@ router.get("/department/:department_id", requireAuth, KnowledgeController.listBy
 // handles the Gold/session-transcript case that has no source file).
 router.get("/:id/download", requireAuth, KnowledgeController.download);
 router.patch("/:id/status", requireN8N, KnowledgeController.statusWebhook);
-// Admin approves a proposal -> triggers the n8n approval flow.
-router.post("/:id/approve", requireAuth, requireAdmin, KnowledgeController.approve);
+// DG o el líder del área aprueban -> dispara el flujo de aprobación en n8n.
+router.post("/:id/approve", requireAuth, KnowledgeController.approve);
 // n8n asks the backend to render the concept .docx into uploads (multer dir).
 router.post("/:id/generate-doc", requireN8N, KnowledgeController.generateDoc);
 // n8n files a fresh proposal's .docx into /Branding/<marca>/Propuesta/.
