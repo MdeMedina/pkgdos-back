@@ -252,15 +252,20 @@ export class SpotlightController {
       const active = voting ?? nominating ?? (await ensureNominatingCycle());
       const reveal = active.status === "closed";
 
-      // Ronda de desempate: solo las empatadas están en juego (feed, gate y voto).
+      // Empate: solo las empatadas están en juego (feed, gate y voto), tanto en la
+      // ronda de desempate como en la espera entre el empate y que se abra la ronda.
       const enDesempate = active.status === "voting" && (active.runoff_nomination_ids?.length ?? 0) > 0;
-      const noms = await prisma.spotlightNomination.findMany({
+      let noms = await prisma.spotlightNomination.findMany({
         // `archived` deja fuera arrastres de proyectos que ya se votaron en otro
         // ciclo: la fila sigue existiendo, pero no compite ni cuenta para el gate.
         where: { cycle_id: active.id, archived: false, ...(enDesempate ? { id: { in: active.runoff_nomination_ids } } : {}) },
         include: { images: true, participants: true },
         orderBy: { created_at: "asc" },
       });
+      if (active.status === "voting" && active.is_tie) {
+        const max = Math.max(0, ...noms.map((n) => n.vote_count));
+        noms = noms.filter((n) => max > 0 && n.vote_count === max);
+      }
       const nominations = await serialize(noms, reveal);
 
       // Mi progreso de review + estado de voto en el ciclo activo.
