@@ -430,6 +430,11 @@ export class SpotlightController {
       const me = uid(req);
       const cycle = await prisma.spotlightCycle.findUnique({ where: { id: cycleId } });
       if (!cycle || cycle.status !== "voting") return res.status(400).json({ message: "Voting is not open" });
+      // Empate declarado o fecha vencida: la votación queda congelada hasta que
+      // dirección abra la ronda de desempate (antes seguía abierta y un voto tardío
+      // rompía el empate solo).
+      if (cycle.is_tie) return res.status(400).json({ message: "La votación terminó en empate: espera la ronda de desempate" });
+      if (cycle.voting_close_at && cycle.voting_close_at <= new Date()) return res.status(400).json({ message: "La votación ya cerró" });
       // Solo se puede votar por una nominación VIVA: una archivada ni siquiera
       // aparece en el feed.
       const nom = await prisma.spotlightNomination.findFirst({ where: { id: nomination_id, cycle_id: cycleId, archived: false }, select: { id: true } });
@@ -532,6 +537,9 @@ export class SpotlightController {
   //  3. reabre la votación: todos vuelven a votar, solo entre las empatadas.
   // La mención de dirección no se toca.
   static async runoff(req: AuthenticatedRequest, res: Response) {
+    // Duración de la ronda: la fecha original ya venció; sin una nueva, el tick
+    // horario la cerraría de inmediato.
+    const HORAS_DESEMPATE = 24;
     try {
       const cycleId = req.params.id;
       const cycle = await prisma.spotlightCycle.findUnique({ where: { id: cycleId } });
@@ -559,7 +567,7 @@ export class SpotlightController {
         prisma.spotlightNomination.updateMany({ where: { cycle_id: cycleId }, data: { vote_count: 0 } }),
         prisma.spotlightCycle.update({
           where: { id: cycleId },
-          data: { status: "voting", is_tie: false, winner_nomination_id: null,
+          data: { status: "voting", is_tie: false, winner_nomination_id: null, voting_close_at: new Date(Date.now() + HORAS_DESEMPATE * 3600 * 1000),
                   runoff_nomination_ids: empatadas.map((n) => n.id), tie_history: [...historial, ronda] as any },
         }),
       ]);
@@ -581,10 +589,10 @@ export class SpotlightController {
         actions.push(`cycle ${c.label} -> voting`);
       }
       // voting -> closed cuando pasó la fecha de votación (red de seguridad; normalmente lo cierra el admin)
-      const toClose = await prisma.spotlightCycle.findMany({ where: { status: "voting", voting_close_at: { lte: now } } });
+      const toClose = await prisma.spotlightCycle.findMany({ where: { status: "voting", is_tie: false, voting_close_at: { lte: now } } });
       for (const c of toClose) {
-        await SpotlightController._computeAndClose(c.id);
-        actions.push(`cycle ${c.label} -> closed`);
+        const r = await SpotlightController._computeAndClose(c.id);
+        actions.push(`cycle ${c.label} -> ${r.tie ? "empate (espera desempate)" : "closed"}`);
       }
       return res.json({ ok: true, actions });
     } catch (e) { console.error("tick", e); return res.status(500).json({ message: "tick failed" }); }

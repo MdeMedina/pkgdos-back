@@ -13,14 +13,26 @@ const storage = multer.diskStorage({
   destination: (_r, _f, cb) => cb(null, uploadDir),
   filename: (_r, file, cb) => cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}-${file.originalname}`),
 });
+// Límite por nominación. El formulario lo valida antes de subir; si aun así se excede,
+// se responde 400 con un mensaje claro (antes caía al genérico "unexpected error").
+const MAX_IMAGENES = 20;
 const imageUpload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+  limits: { fileSize: 10 * 1024 * 1024, files: MAX_IMAGENES },
   fileFilter: (_r, file, cb) => {
     if (/^image\//.test(file.mimetype)) cb(null, true);
-    else cb(new Error("Solo se permiten imágenes"));
+    else cb(Object.assign(new Error("Solo se permiten imágenes"), { status: 400 }));
   },
 });
+const subirImagenes = (req: any, res: any, next: any) =>
+  imageUpload.array("images", MAX_IMAGENES)(req, res, (err: any) => {
+    if (!err) return next();
+    const message =
+      err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE" ? `Máximo ${MAX_IMAGENES} imágenes por nominación.`
+      : err.code === "LIMIT_FILE_SIZE" ? "Cada imagen debe pesar menos de 10 MB."
+      : err.message || "No se pudo subir la imagen.";
+    return res.status(400).json({ message });
+  });
 
 const router = Router();
 
@@ -32,8 +44,8 @@ router.get("/winners", requireAuth, SpotlightController.winners);
 router.get("/awards/:year", requireAuth, SpotlightController.getAwards);
 router.post("/awards/:year/vote", requireAuth, SpotlightController.awardVote);
 router.post("/awards/:year/submit", requireAuth, SpotlightController.submitAwardBallot);
-router.post("/nominations", requireAuth, imageUpload.array("images", 10), SpotlightController.createNomination);
-router.patch("/nominations/:id", requireAuth, imageUpload.array("images", 10), SpotlightController.updateNomination);
+router.post("/nominations", requireAuth, subirImagenes, SpotlightController.createNomination);
+router.patch("/nominations/:id", requireAuth, subirImagenes, SpotlightController.updateNomination);
 router.get("/nominations/:id", requireAuth, SpotlightController.getNomination);
 router.get("/link-preview", requireAuth, SpotlightController.linkPreview);
 router.get("/link-image", SpotlightController.linkImage);
