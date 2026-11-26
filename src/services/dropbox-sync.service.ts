@@ -170,6 +170,9 @@ async function applyFile(entry: Extract<DbxEntry, { ".tag": "file" }>) {
         dropbox_rev: entry.rev,
         dropbox_content_hash: entry.content_hash ?? null,
         version_count: 1,
+        // Fecha real del archivo para que la búsqueda del agente prefiera lo nuevo. Si la ruta o el
+        // nombre traen una fecha, el trigger de la base la usa en su lugar.
+        ...(entry.client_modified ? { fecha_documento: new Date(entry.client_modified), fecha_origen: "dropbox" } : {}),
       },
     });
     fileId = created.id;
@@ -203,6 +206,7 @@ async function applyFile(entry: Extract<DbxEntry, { ".tag": "file" }>) {
         dropbox_path_lower: lower,
         dropbox_rev: entry.rev,
         dropbox_content_hash: entry.content_hash ?? null,
+        ...(entry.client_modified ? { fecha_documento: new Date(entry.client_modified), fecha_origen: "dropbox" } : {}),
       },
     });
     if (existing.current_version_id) {

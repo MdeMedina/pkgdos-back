@@ -124,6 +124,8 @@ export type DbxEntry =
       rev: string;
       size: number;
       content_hash?: string;
+      client_modified?: string; // última modificación real del archivo (no la fecha de subida)
+      server_modified?: string;
     }
   | {
       ".tag": "deleted";

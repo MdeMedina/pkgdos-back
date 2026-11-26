@@ -375,6 +375,9 @@ model DriveFile {
   // Google Doc de origen (sincronización programada Google Drive → RAG). Link estable
   // Google↔PKGD: al re-editarse en Google, se sube una versión nueva a ESTE mismo archivo.
   gdoc_id              String? @unique
+  fecha_documento      DateTime? @db.Timestamptz(6) // fecha real (nombre/ruta > Google > Dropbox > subida); la calcula un trigger
+  fecha_origen         String? // nombre | ruta | google | dropbox | subida
+  fuente_rectora       Boolean @default(false) // sus fragmentos ganan en la búsqueda del agente (datos que mandan: precios, SKU)
   gdoc_modified_time   String? // modifiedTime (RFC3339) de la última versión sincronizada; evita re-ingestar sin cambios
   // Si este archivo es un .zip: subcarpeta donde se extrajo su contenido. Al subir una versión
   // nueva del zip se arrasa esa subcarpeta y se re-extrae (solo cuenta la versión actual).
